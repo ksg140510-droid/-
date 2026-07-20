@@ -31,6 +31,10 @@ class _DNX64:
     _dll = None
     _tried = False
     _idx = 0
+    # LED 유지용 백그라운드 스레드와 메인 스레드(노출고정/화질고정 등)가
+    # 동시에 DLL을 호출하면 장비가 명령을 잘못 알아듣거나 먹통이 될 수 있어
+    # 모든 DNX64 호출은 이 락을 잡고 나서 하도록 한다.
+    lock = threading.Lock()
 
     @classmethod
     def get(cls):
@@ -2349,6 +2353,11 @@ class HoleCounter(tk.Tk):
         self._line_active   = None   # 방향키 미세조정 대상 ('p1' | 'p2' | 'line' | None)
 
         _migrate_json_to_db_if_needed()
+        # 이력 DB 자동 백업 — 지금까지는 사용자가 수동으로 "백업" 버튼을 누를
+        # 때만 백업이 생겼음. 앱을 켤 때마다 자동으로 한 번 백업해둬서, 파일이
+        # 사라지거나 손상돼도 최소한 "지난 실행 시점"으로는 복구할 수 있게 함.
+        # 실패해도(디스크 오류 등) 조용히 넘어감 — 시작 자체를 막으면 안 되므로.
+        _backup_history_db(reason='자동_시작시')
         self._load_total_products()
         self._load_config()
         self._refresh_suggestion_cache()
@@ -4757,12 +4766,13 @@ class HoleCounter(tk.Tk):
         idx = _DNX64._idx
         if not self._exposure_locked:
             try:
-                current_exp = dll.GetExposureValue(idx)
-                current_ae  = dll.GetAETarget(idx)
-                dll.SetAutoExposure(idx, 0)
-                time.sleep(0.05)
-                dll.SetExposureValue(idx, current_exp)
-                dll.SetAETarget(idx, current_ae)
+                with _DNX64.lock:
+                    current_exp = dll.GetExposureValue(idx)
+                    current_ae  = dll.GetAETarget(idx)
+                    dll.SetAutoExposure(idx, 0)
+                    time.sleep(0.05)
+                    dll.SetExposureValue(idx, current_exp)
+                    dll.SetAETarget(idx, current_ae)
             except Exception:
                 self.lbl_flash.configure(text='노출 고정 실패', fg=ACC_YEL)
                 self.after(2000, lambda: self.lbl_flash.configure(text=''))
@@ -4771,7 +4781,8 @@ class HoleCounter(tk.Tk):
             self._btn_exposure_lock.configure(text='🔒 노출 고정 ON')
         else:
             try:
-                dll.SetAutoExposure(idx, 1)
+                with _DNX64.lock:
+                    dll.SetAutoExposure(idx, 1)
             except Exception:
                 pass
             self._exposure_locked = False
@@ -4790,7 +4801,8 @@ class HoleCounter(tk.Tk):
         idx = _DNX64._idx
         if not self._led_on:
             try:
-                dll.SetLEDState(idx, 1)
+                with _DNX64.lock:
+                    dll.SetLEDState(idx, 1)
             except Exception:
                 self.lbl_flash.configure(text='LED 제어 실패', fg=ACC_YEL)
                 self.after(2000, lambda: self.lbl_flash.configure(text=''))
@@ -4801,7 +4813,8 @@ class HoleCounter(tk.Tk):
             def _keepalive():
                 while getattr(self, 'running', True) and self._led_on:
                     try:
-                        dll.SetLEDState(idx, 1)
+                        with _DNX64.lock:
+                            dll.SetLEDState(idx, 1)
                     except Exception:
                         pass
                     time.sleep(2.0)
@@ -4809,7 +4822,8 @@ class HoleCounter(tk.Tk):
         else:
             self._led_on = False
             try:
-                dll.SetLEDState(idx, 0)
+                with _DNX64.lock:
+                    dll.SetLEDState(idx, 0)
             except Exception:
                 pass
             self._btn_led.configure(text='💡 LED')
@@ -4827,8 +4841,9 @@ class HoleCounter(tk.Tk):
             self.after(2000, lambda: self.lbl_flash.configure(text=''))
             return
         try:
-            brightness = dll.GetVideoProcAmp(0)
-            contrast   = dll.GetVideoProcAmp(1)
+            with _DNX64.lock:
+                brightness = dll.GetVideoProcAmp(0)
+                contrast   = dll.GetVideoProcAmp(1)
         except Exception:
             self.lbl_flash.configure(text='화질 고정 실패', fg=ACC_YEL)
             self.after(2000, lambda: self.lbl_flash.configure(text=''))
@@ -4853,10 +4868,11 @@ class HoleCounter(tk.Tk):
         if dll is None:
             return
         try:
-            if self._locked_brightness is not None:
-                dll.SetVideoProcAmp(0, self._locked_brightness)
-            if self._locked_contrast is not None:
-                dll.SetVideoProcAmp(1, self._locked_contrast)
+            with _DNX64.lock:
+                if self._locked_brightness is not None:
+                    dll.SetVideoProcAmp(0, self._locked_brightness)
+                if self._locked_contrast is not None:
+                    dll.SetVideoProcAmp(1, self._locked_contrast)
             if hasattr(self, '_btn_quality_lock'):
                 self.after(0, lambda: self._btn_quality_lock.configure(text='🎨 화질 고정됨'))
                 self.after(0, self._refresh_sdk_button_colors)
