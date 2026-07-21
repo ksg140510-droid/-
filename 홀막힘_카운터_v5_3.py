@@ -31,10 +31,6 @@ class _DNX64:
     _dll = None     # 완전히 준비된(GetVideoDeviceCount()>0까지 확인된) DLL 핸들
     _cdll = None    # ctypes.CDLL 로딩 자체는 성공한 DLL(재사용, 재로딩 방지용)
     _idx = 0
-    # LED 유지용 백그라운드 스레드와 메인 스레드(노출고정/화질고정 등)가
-    # 동시에 DLL을 호출하면 장비가 명령을 잘못 알아듣거나 먹통이 될 수 있어
-    # 모든 DNX64 호출은 이 락을 잡고 나서 하도록 한다.
-    lock = threading.Lock()
 
     @classmethod
     def get(cls):
@@ -2342,10 +2338,6 @@ class HoleCounter(tk.Tk):
         self._cam_gen            = 0   # 카메라 재연결 세대 번호 — 이전 _cam_loop 스레드 종료 신호
         self._exposure_locked    = False   # DNX64 SDK로 노출 고정했는지
         self._led_on             = False   # DNX64 SDK로 LED를 켜뒀는지
-        # LED "켜짐 유지" 백그라운드 스레드가 보내는 낡은 신호를 무시하기 위한
-        # 세대 번호. OFF를 누르면 즉시(블로킹 없이) 번호를 올려서, 스레드가
-        # 뒤늦게 보내려는 "켜져라" 신호를 스스로 무시하게 만든다.
-        self._led_generation = 0
         self._locked_brightness  = None    # DNX64 하드웨어 밝기 고정값(설정파일에서 로드)
         self._locked_contrast    = None    # DNX64 하드웨어 대비 고정값(설정파일에서 로드)
         self._cutting_side       = None    # 제품 컷팅 이미지 캡처 — 'R' | 'L' | None
@@ -4811,20 +4803,14 @@ class HoleCounter(tk.Tk):
         꺼버리는 것을 확인해서(원인 미상), 켜져있는 동안 2초마다 재전송(keep-alive)
         하는 백그라운드 스레드로 계속 켜진 상태를 유지한다.
 
-        사용자가 직접 누르는 ON/OFF는 원래처럼 메인(UI) 스레드에서 동기 호출한다.
-        한때 이걸 백그라운드 스레드로 옮겨봤으나(2026-07-21), 그 직후 실기기에서
-        LED OFF가 아예 안 되는 증상이 나타났다 — 이 장비의 DNX64 DLL이 "매번 다른
-        스레드"에서 호출되는 것에 민감하게 반응하는 것으로 의심되어(이전에는
-        keep-alive 스레드 하나만 메인 스레드와 별개였고 그 외 호출은 항상 메인
-        스레드였음), 원래의 "메인 스레드에서 직접 호출" 방식으로 되돌렸다.
-
-        keep-alive 스레드가 "켜져라" 신호를 보내려는 순간과 사용자의 OFF 클릭이
-        겹치면, OFF 신호가 먼저 나간 직후 스레드의 "켜져라" 신호가 뒤늦게 도착해
-        실제로는 꺼지지 않는 경합이 있었다(2026-07-21 발견). 이건 그대로 "세대
-        번호(generation) + 락"으로 막는다: OFF를 누르면 번호를 올리고, keep-alive는
-        "보내기 직전, 락을 잡은 상태에서" 자기 세대 번호가 아직 최신인지 재확인
-        후에만 전송한다. keep-alive는 원래도 메인 스레드가 아닌 별도 스레드였으므로
-        이 부분은 스레드 문제를 새로 만들지 않는다."""
+        2026-07-21: LED OFF가 안 된다는 사용자 보고로 이 함수를 여러 차례
+        고쳤으나(백그라운드 스레드화 → 되돌림, 락+세대번호 추가) 실기기에서
+        여전히 OFF가 안 된다는 재보고를 받아, 원인 규명을 위해 2026-07-16에
+        사용자가 직접 확인했던 "원본" 그대로(락/세대번호 전부 제거)로 되돌렸다.
+        이 상태에서도 OFF가 안 된다면, 원인은 이 함수의 코드가 아니라 장비/드라이버
+        쪽(예: LED가 켜진 뒤 일정 시간 내에는 OFF 명령이 무시되는 하드웨어 상태머신,
+        USB 드라이버 캐시, 혹은 반복 테스트로 인한 장치 상태 꼬임)일 가능성이 높다는
+        뜻이므로, 그 각도로 재조사해야 한다."""
         dll = _DNX64.get()
         if dll is None:
             self.lbl_flash.configure(text='DNX64 SDK를 사용할 수 없습니다', fg=ACC_YEL)
@@ -4832,11 +4818,8 @@ class HoleCounter(tk.Tk):
             return
         idx = _DNX64._idx
         if not self._led_on:
-            self._led_generation += 1
-            my_gen = self._led_generation
             try:
-                with _DNX64.lock:
-                    dll.SetLEDState(idx, 1)
+                dll.SetLEDState(idx, 1)
             except Exception:
                 self.lbl_flash.configure(text='LED 제어 실패', fg=ACC_YEL)
                 self.after(2000, lambda: self.lbl_flash.configure(text=''))
@@ -4846,23 +4829,16 @@ class HoleCounter(tk.Tk):
 
             def _keepalive():
                 while getattr(self, 'running', True) and self._led_on:
-                    time.sleep(2.0)
                     try:
-                        with _DNX64.lock:
-                            # 락을 잡은 이 순간에도 여전히 내 세대가 최신일
-                            # 때만 전송 — OFF가 그 사이 눌렸다면(세대가
-                            # 바뀌었다면) 이 낡은 신호는 조용히 무시된다.
-                            if my_gen == self._led_generation:
-                                dll.SetLEDState(idx, 1)
+                        dll.SetLEDState(idx, 1)
                     except Exception:
                         pass
+                    time.sleep(2.0)
             threading.Thread(target=_keepalive, daemon=True).start()
         else:
             self._led_on = False
-            self._led_generation += 1   # keep-alive의 낡은 전송을 무효화
             try:
-                with _DNX64.lock:
-                    dll.SetLEDState(idx, 0)
+                dll.SetLEDState(idx, 0)
             except Exception:
                 pass
             self._btn_led.configure(text='💡 LED')
