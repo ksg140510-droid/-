@@ -56,7 +56,12 @@ class _DNX64:
                 dll.SetExposureValue.argtypes = [ctypes.c_int, ctypes.c_long]
                 dll.SetExposureValue.restype = None
                 dll.SetLEDState.argtypes = [ctypes.c_int, ctypes.c_int]
-                dll.SetLEDState.restype = None
+                # 공식 SDK 문서(DN64 DLL control reference)에는 SetLEDState가
+                # Long을 반환한다고 되어 있으나 기존 코드는 이를 버리고 있었다
+                # (restype=None). OFF 진단을 위해 반환값도 받아오도록 수정.
+                dll.SetLEDState.restype = ctypes.c_long
+                dll.GetLEDState.argtypes = [ctypes.c_int]
+                dll.GetLEDState.restype = ctypes.c_long
                 dll.GetAETarget.argtypes = [ctypes.c_int]
                 dll.GetAETarget.restype = ctypes.c_long
                 dll.SetAETarget.argtypes = [ctypes.c_int, ctypes.c_long]
@@ -4798,6 +4803,16 @@ class HoleCounter(tk.Tk):
             self._btn_exposure_lock.configure(text='🔒 노출 고정')
         self._refresh_sdk_button_colors()
 
+    def _led_state_label(self, dll, idx):
+        """GetLEDState()로 장치가 스스로 보고하는 실제 LED 상태를 문자열로.
+        공식 SDK 문서 기준: 0=LED off, 1=LED1 on, 2=LED2 on, -1=access error.
+        진단용 — 소프트웨어 신호가 장치에 실제로 반영됐는지 확인하기 위함."""
+        try:
+            v = dll.GetLEDState(idx)
+        except Exception:
+            return '읽기실패'
+        return {0: '꺼짐', 1: '켜짐(1)', 2: '켜짐(2)', -1: '접근오류'}.get(v, f'알수없음({v})')
+
     def _toggle_led(self):
         """DNX64 SDK로 LED를 켠다/끈다. SetLEDState(1)은 몇 초 후 장치가 자동으로
         꺼버리는 것을 확인해서(원인 미상), 켜져있는 동안 2초마다 재전송(keep-alive)
@@ -4805,12 +4820,13 @@ class HoleCounter(tk.Tk):
 
         2026-07-21: LED OFF가 안 된다는 사용자 보고로 이 함수를 여러 차례
         고쳤으나(백그라운드 스레드화 → 되돌림, 락+세대번호 추가) 실기기에서
-        여전히 OFF가 안 된다는 재보고를 받아, 원인 규명을 위해 2026-07-16에
-        사용자가 직접 확인했던 "원본" 그대로(락/세대번호 전부 제거)로 되돌렸다.
-        이 상태에서도 OFF가 안 된다면, 원인은 이 함수의 코드가 아니라 장비/드라이버
-        쪽(예: LED가 켜진 뒤 일정 시간 내에는 OFF 명령이 무시되는 하드웨어 상태머신,
-        USB 드라이버 캐시, 혹은 반복 테스트로 인한 장치 상태 꼬임)일 가능성이 높다는
-        뜻이므로, 그 각도로 재조사해야 한다."""
+        여전히 OFF가 안 된다는 재보고를 받아, 2026-07-16에 사용자가 직접
+        확인했던 "원본" 그대로(락/세대번호 전부 제거)로 되돌렸다.
+        추가로 공식 SDK 문서에 있는 GetLEDState()(장치가 스스로 보고하는 실제
+        LED 상태 조회)를 붙여서, OFF 클릭 시 장치가 "꺼짐"이라고 응답하는지
+        아니면 여전히 "켜짐"이라고 응답하는지 화면에 보여준다 — 이걸로 "소프트웨어
+        신호는 장치에 도달했는데 물리적으로만 안 꺼지는 것"인지 "장치 자체가 OFF
+        요청을 거부/무시하는 것"인지 구분할 수 있다."""
         dll = _DNX64.get()
         if dll is None:
             self.lbl_flash.configure(text='DNX64 SDK를 사용할 수 없습니다', fg=ACC_YEL)
@@ -4826,6 +4842,9 @@ class HoleCounter(tk.Tk):
                 return
             self._led_on = True
             self._btn_led.configure(text='💡 LED ON')
+            state = self._led_state_label(dll, idx)
+            self.lbl_flash.configure(text=f'LED ON 전송 — 장치 응답: {state}', fg='#4a9fd4')
+            self.after(2500, lambda: self.lbl_flash.configure(text=''))
 
             def _keepalive():
                 while getattr(self, 'running', True) and self._led_on:
@@ -4842,6 +4861,10 @@ class HoleCounter(tk.Tk):
             except Exception:
                 pass
             self._btn_led.configure(text='💡 LED')
+            state = self._led_state_label(dll, idx)
+            fg = '#4a9fd4' if state == '꺼짐' else ACC_YEL
+            self.lbl_flash.configure(text=f'LED OFF 전송 — 장치 응답: {state}', fg=fg)
+            self.after(3500, lambda: self.lbl_flash.configure(text=''))
         self._refresh_sdk_button_colors()
 
     def _lock_quality_now(self):
