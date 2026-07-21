@@ -2332,6 +2332,11 @@ class HoleCounter(tk.Tk):
         self._cam_gen            = 0   # 카메라 재연결 세대 번호 — 이전 _cam_loop 스레드 종료 신호
         self._exposure_locked    = False   # DNX64 SDK로 노출 고정했는지
         self._led_on             = False   # DNX64 SDK로 LED를 켜뒀는지
+        # LED "켜짐 유지" 백그라운드 스레드 제어용. OFF 클릭 시 이 스레드가
+        # 완전히 멈춘 걸 확인한 뒤에야 최종 OFF 신호를 보내야, 스레드가 보낸
+        # "켜져라" 신호가 OFF 신호보다 늦게 도착해 꺼지지 않는 경합을 막을 수 있다.
+        self._led_keepalive_stop   = threading.Event()
+        self._led_keepalive_thread = None
         self._locked_brightness  = None    # DNX64 하드웨어 밝기 고정값(설정파일에서 로드)
         self._locked_contrast    = None    # DNX64 하드웨어 대비 고정값(설정파일에서 로드)
         self._cutting_side       = None    # 제품 컷팅 이미지 캡처 — 'R' | 'L' | None
@@ -4792,7 +4797,13 @@ class HoleCounter(tk.Tk):
     def _toggle_led(self):
         """DNX64 SDK로 LED를 켠다/끈다. SetLEDState(1)은 몇 초 후 장치가 자동으로
         꺼버리는 것을 확인해서(원인 미상), 켜져있는 동안 2초마다 재전송(keep-alive)
-        하는 백그라운드 스레드로 계속 켜진 상태를 유지한다."""
+        하는 백그라운드 스레드로 계속 켜진 상태를 유지한다.
+
+        OFF 처리 순서에 주의: keep-alive 스레드가 "켜져라" 신호를 보내려는 순간과
+        사용자의 OFF 클릭이 겹치면, OFF 신호가 먼저 나간 직후 스레드의 "켜져라"
+        신호가 뒤늦게 도착해 실제로는 꺼지지 않는 경합이 있었다(2026-07-21 발견).
+        이를 막기 위해 OFF 시 스레드를 먼저 멈추고 완전히 멈춘 걸 확인(join)한
+        뒤에야 최종 OFF 신호를 보내, OFF가 항상 마지막 신호가 되도록 한다."""
         dll = _DNX64.get()
         if dll is None:
             self.lbl_flash.configure(text='DNX64 SDK를 사용할 수 없습니다', fg=ACC_YEL)
@@ -4810,17 +4821,29 @@ class HoleCounter(tk.Tk):
             self._led_on = True
             self._btn_led.configure(text='💡 LED ON')
 
+            self._led_keepalive_stop.clear()
+
             def _keepalive():
-                while getattr(self, 'running', True) and self._led_on:
+                while (getattr(self, 'running', True)
+                       and not self._led_keepalive_stop.is_set()):
                     try:
                         with _DNX64.lock:
                             dll.SetLEDState(idx, 1)
                     except Exception:
                         pass
-                    time.sleep(2.0)
-            threading.Thread(target=_keepalive, daemon=True).start()
+                    # sleep 대신 wait를 써서, 정지 신호가 오면 2초를 다 기다리지
+                    # 않고 즉시 깨어나 루프를 빠져나간다(OFF 응답성 확보).
+                    self._led_keepalive_stop.wait(2.0)
+            th = threading.Thread(target=_keepalive, daemon=True)
+            self._led_keepalive_thread = th
+            th.start()
         else:
             self._led_on = False
+            self._led_keepalive_stop.set()
+            th = self._led_keepalive_thread
+            if th is not None:
+                th.join(timeout=1.0)   # 스레드가 완전히 멈춘 뒤에만 최종 OFF 전송
+                self._led_keepalive_thread = None
             try:
                 with _DNX64.lock:
                     dll.SetLEDState(idx, 0)
@@ -5885,7 +5908,8 @@ class HoleCounter(tk.Tk):
                                         f'카운트 {cnt}건이 저장되지 않았습니다.\n종료하시겠습니까?'):
                 return
         self.running = False
-        self._led_on = False   # keep-alive 스레드가 다음 루프에서 스스로 멈추도록
+        self._led_on = False   # keep-alive 스레드가 즉시 멈추도록
+        self._led_keepalive_stop.set()
         # 카메라 스레드(_cam_loop)가 cam.read()를 쉴 새 없이 반복 호출하는 구조라,
         # 종료 순간에 OpenCV/DirectShow 네이티브 호출 도중일 확률이 높다. 그 상태에서
         # 바로 강제종료하면 Windows가 그 커널 I/O가 끝날 때까지 프로세스 정리를
