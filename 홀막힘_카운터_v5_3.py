@@ -2332,11 +2332,10 @@ class HoleCounter(tk.Tk):
         self._cam_gen            = 0   # 카메라 재연결 세대 번호 — 이전 _cam_loop 스레드 종료 신호
         self._exposure_locked    = False   # DNX64 SDK로 노출 고정했는지
         self._led_on             = False   # DNX64 SDK로 LED를 켜뒀는지
-        # LED "켜짐 유지" 백그라운드 스레드 제어용. OFF 클릭 시 이 스레드가
-        # 완전히 멈춘 걸 확인한 뒤에야 최종 OFF 신호를 보내야, 스레드가 보낸
-        # "켜져라" 신호가 OFF 신호보다 늦게 도착해 꺼지지 않는 경합을 막을 수 있다.
-        self._led_keepalive_stop   = threading.Event()
-        self._led_keepalive_thread = None
+        # LED "켜짐 유지" 백그라운드 스레드가 보내는 낡은 신호를 무시하기 위한
+        # 세대 번호. OFF를 누르면 즉시(블로킹 없이) 번호를 올려서, 스레드가
+        # 뒤늦게 보내려는 "켜져라" 신호를 스스로 무시하게 만든다.
+        self._led_generation = 0
         self._locked_brightness  = None    # DNX64 하드웨어 밝기 고정값(설정파일에서 로드)
         self._locked_contrast    = None    # DNX64 하드웨어 대비 고정값(설정파일에서 로드)
         self._cutting_side       = None    # 제품 컷팅 이미지 캡처 — 'R' | 'L' | None
@@ -4762,7 +4761,13 @@ class HoleCounter(tk.Tk):
         매 프레임 자동노출이 흔들려서 측정 문턱값이 오락가락하는 것을 방지.
         DinoCapture 없이 카운터 앱 자체 카메라 스트림만으로 동작 확인됨.
         ExposureValue, AETarget 둘 다 Set 후 readback이 실제로 바뀌는 것을
-        확인함(2026-07-16)."""
+        확인함(2026-07-16).
+
+        실제 DLL 호출은 전부 백그라운드 스레드에서 수행한다 — 이 장비의 USB
+        통신이 느리거나 불안정할 때 메인(UI) 스레드에서 동기 호출하면 앱 전체가
+        멈춘 것처럼 보이는 문제가 있었다(2026-07-21, LED 건에서 먼저 발견되어
+        여기도 같은 방식으로 함께 고침). 버튼 상태는 클릭 즉시(낙관적으로) 바꾸고,
+        DLL 호출이 실패하면 그때 되돌린다."""
         dll = _DNX64.get()
         if dll is None:
             self.lbl_flash.configure(text='DNX64 SDK를 사용할 수 없습니다', fg=ACC_YEL)
@@ -4770,40 +4775,58 @@ class HoleCounter(tk.Tk):
             return
         idx = _DNX64._idx
         if not self._exposure_locked:
-            try:
-                with _DNX64.lock:
-                    current_exp = dll.GetExposureValue(idx)
-                    current_ae  = dll.GetAETarget(idx)
-                    dll.SetAutoExposure(idx, 0)
-                    time.sleep(0.05)
-                    dll.SetExposureValue(idx, current_exp)
-                    dll.SetAETarget(idx, current_ae)
-            except Exception:
-                self.lbl_flash.configure(text='노출 고정 실패', fg=ACC_YEL)
-                self.after(2000, lambda: self.lbl_flash.configure(text=''))
-                return
             self._exposure_locked = True
             self._btn_exposure_lock.configure(text='🔒 노출 고정 ON')
+            self._refresh_sdk_button_colors()
+
+            def _worker():
+                try:
+                    with _DNX64.lock:
+                        current_exp = dll.GetExposureValue(idx)
+                        current_ae  = dll.GetAETarget(idx)
+                        dll.SetAutoExposure(idx, 0)
+                        time.sleep(0.05)
+                        dll.SetExposureValue(idx, current_exp)
+                        dll.SetAETarget(idx, current_ae)
+                except Exception:
+                    def _fail():
+                        self._exposure_locked = False
+                        self._btn_exposure_lock.configure(text='🔒 노출 고정')
+                        self._refresh_sdk_button_colors()
+                        self.lbl_flash.configure(text='노출 고정 실패', fg=ACC_YEL)
+                        self.after(2000, lambda: self.lbl_flash.configure(text=''))
+                    self.after(0, _fail)
+            threading.Thread(target=_worker, daemon=True).start()
         else:
-            try:
-                with _DNX64.lock:
-                    dll.SetAutoExposure(idx, 1)
-            except Exception:
-                pass
             self._exposure_locked = False
             self._btn_exposure_lock.configure(text='🔒 노출 고정')
-        self._refresh_sdk_button_colors()
+            self._refresh_sdk_button_colors()
+
+            def _worker():
+                try:
+                    with _DNX64.lock:
+                        dll.SetAutoExposure(idx, 1)
+                except Exception:
+                    pass
+            threading.Thread(target=_worker, daemon=True).start()
 
     def _toggle_led(self):
         """DNX64 SDK로 LED를 켠다/끈다. SetLEDState(1)은 몇 초 후 장치가 자동으로
         꺼버리는 것을 확인해서(원인 미상), 켜져있는 동안 2초마다 재전송(keep-alive)
         하는 백그라운드 스레드로 계속 켜진 상태를 유지한다.
 
-        OFF 처리 순서에 주의: keep-alive 스레드가 "켜져라" 신호를 보내려는 순간과
-        사용자의 OFF 클릭이 겹치면, OFF 신호가 먼저 나간 직후 스레드의 "켜져라"
-        신호가 뒤늦게 도착해 실제로는 꺼지지 않는 경합이 있었다(2026-07-21 발견).
-        이를 막기 위해 OFF 시 스레드를 먼저 멈추고 완전히 멈춘 걸 확인(join)한
-        뒤에야 최종 OFF 신호를 보내, OFF가 항상 마지막 신호가 되도록 한다."""
+        이 함수는 DLL을 절대 메인(UI) 스레드에서 직접 호출하지 않는다 — 예전엔
+        동기 호출이라 이 장비의 USB 응답이 느릴 때 앱 전체가 멈춘 것처럼 보이는
+        문제가 있었다(2026-07-21). 버튼 상태는 클릭 즉시(낙관적으로) 바꾸고,
+        실제 SetLEDState 호출은 전부 백그라운드 스레드에서 수행한다.
+
+        keep-alive 스레드가 "켜져라" 신호를 보내려는 순간과 사용자의 OFF 클릭이
+        겹치면, OFF 신호가 먼저 나간 직후 스레드의 "켜져라" 신호가 뒤늦게 도착해
+        실제로는 꺼지지 않는 경합이 있었다(같은 날 발견). "세대 번호(generation)"로
+        해결: OFF를 누르면 번호를 올리고, keep-alive는 "보내기 직전, 락을 잡은
+        상태에서" 자기 세대 번호가 아직 최신인지 재확인 후에만 전송한다. 두 신호가
+        같은 락으로 순서가 매겨지므로 뒤늦게 도착하는 낡은 '켜져라' 신호는 항상
+        무시된다."""
         dll = _DNX64.get()
         if dll is None:
             self.lbl_flash.configure(text='DNX64 SDK를 사용할 수 없습니다', fg=ACC_YEL)
@@ -4811,75 +4834,95 @@ class HoleCounter(tk.Tk):
             return
         idx = _DNX64._idx
         if not self._led_on:
-            try:
-                with _DNX64.lock:
-                    dll.SetLEDState(idx, 1)
-            except Exception:
-                self.lbl_flash.configure(text='LED 제어 실패', fg=ACC_YEL)
-                self.after(2000, lambda: self.lbl_flash.configure(text=''))
-                return
+            self._led_generation += 1
+            my_gen = self._led_generation
             self._led_on = True
             self._btn_led.configure(text='💡 LED ON')
+            self._refresh_sdk_button_colors()
 
-            self._led_keepalive_stop.clear()
+            def _worker():
+                try:
+                    with _DNX64.lock:
+                        dll.SetLEDState(idx, 1)
+                except Exception:
+                    def _fail():
+                        self._led_on = False
+                        self._btn_led.configure(text='💡 LED')
+                        self._refresh_sdk_button_colors()
+                        self.lbl_flash.configure(text='LED 제어 실패', fg=ACC_YEL)
+                        self.after(2000, lambda: self.lbl_flash.configure(text=''))
+                    self.after(0, _fail)
+                    return
 
-            def _keepalive():
-                while (getattr(self, 'running', True)
-                       and not self._led_keepalive_stop.is_set()):
-                    try:
-                        with _DNX64.lock:
-                            dll.SetLEDState(idx, 1)
-                    except Exception:
-                        pass
-                    # sleep 대신 wait를 써서, 정지 신호가 오면 2초를 다 기다리지
-                    # 않고 즉시 깨어나 루프를 빠져나간다(OFF 응답성 확보).
-                    self._led_keepalive_stop.wait(2.0)
-            th = threading.Thread(target=_keepalive, daemon=True)
-            self._led_keepalive_thread = th
-            th.start()
+                def _keepalive():
+                    while getattr(self, 'running', True) and self._led_on:
+                        time.sleep(2.0)
+                        try:
+                            with _DNX64.lock:
+                                # 락을 잡은 이 순간에도 여전히 내 세대가 최신일
+                                # 때만 전송 — OFF가 그 사이 눌렸다면(세대가
+                                # 바뀌었다면) 이 낡은 신호는 조용히 무시된다.
+                                if my_gen == self._led_generation:
+                                    dll.SetLEDState(idx, 1)
+                        except Exception:
+                            pass
+                threading.Thread(target=_keepalive, daemon=True).start()
+            threading.Thread(target=_worker, daemon=True).start()
         else:
             self._led_on = False
-            self._led_keepalive_stop.set()
-            th = self._led_keepalive_thread
-            if th is not None:
-                th.join(timeout=1.0)   # 스레드가 완전히 멈춘 뒤에만 최종 OFF 전송
-                self._led_keepalive_thread = None
-            try:
-                with _DNX64.lock:
-                    dll.SetLEDState(idx, 0)
-            except Exception:
-                pass
+            self._led_generation += 1   # keep-alive의 낡은 전송을 즉시 무효화
             self._btn_led.configure(text='💡 LED')
-        self._refresh_sdk_button_colors()
+            self._refresh_sdk_button_colors()
+
+            def _worker():
+                try:
+                    with _DNX64.lock:
+                        dll.SetLEDState(idx, 0)
+                except Exception:
+                    pass
+            threading.Thread(target=_worker, daemon=True).start()
 
     def _lock_quality_now(self):
         """DNX64 SDK로 현재 하드웨어 밝기/대비값(VideoProcAmp)을 그대로 읽어서
         설정파일에 저장해둔다. 다음 실행 시(_apply_locked_quality) 자동으로
         같은 값을 재적용해서, OS/드라이버가 기본값을 다르게 잡거나 다른 프로그램이
         건드려놔도 항상 같은 화질로 검사하게 한다. Set 후 readback이 실제로
-        바뀌는 것을 확인함(2026-07-16, VideoProcAmp index 0=밝기)."""
+        바뀌는 것을 확인함(2026-07-16, VideoProcAmp index 0=밝기).
+
+        DLL 읽기는 백그라운드 스레드에서 하고, 결과를 받은 뒤에만 self.after(0, ...)
+        로 메인 스레드에 넘겨 위젯/설정파일을 갱신한다 — 이 장비의 USB 응답이
+        느릴 때 메인 스레드가 멈춘 것처럼 보이는 문제를 막기 위함(2026-07-21)."""
         dll = _DNX64.get()
         if dll is None:
             self.lbl_flash.configure(text='DNX64 SDK를 사용할 수 없습니다', fg=ACC_YEL)
             self.after(2000, lambda: self.lbl_flash.configure(text=''))
             return
-        try:
-            with _DNX64.lock:
-                brightness = dll.GetVideoProcAmp(0)
-                contrast   = dll.GetVideoProcAmp(1)
-        except Exception:
-            self.lbl_flash.configure(text='화질 고정 실패', fg=ACC_YEL)
-            self.after(2000, lambda: self.lbl_flash.configure(text=''))
-            return
-        self._locked_brightness = brightness
-        self._locked_contrast   = contrast
-        self._save_config()
-        self._btn_quality_lock.configure(text='🎨 화질 고정됨')
-        self._refresh_sdk_button_colors()
-        self.lbl_flash.configure(
-            text=f'현재 화질(밝기{brightness}/대비{contrast})로 고정 — 재시작해도 유지됨',
-            fg='#4a9fd4')
-        self.after(2500, lambda: self.lbl_flash.configure(text=''))
+
+        def _worker():
+            try:
+                with _DNX64.lock:
+                    brightness = dll.GetVideoProcAmp(0)
+                    contrast   = dll.GetVideoProcAmp(1)
+            except Exception:
+                def _fail():
+                    self.lbl_flash.configure(text='화질 고정 실패', fg=ACC_YEL)
+                    self.after(2000, lambda: self.lbl_flash.configure(text=''))
+                self.after(0, _fail)
+                return
+
+            def _done():
+                self._locked_brightness = brightness
+                self._locked_contrast   = contrast
+                self._save_config()
+                self._btn_quality_lock.configure(text='🎨 화질 고정됨')
+                self._refresh_sdk_button_colors()
+                self.lbl_flash.configure(
+                    text=f'현재 화질(밝기{brightness}/대비{contrast})로 고정 — 재시작해도 유지됨',
+                    fg='#4a9fd4')
+                self.after(2500, lambda: self.lbl_flash.configure(text=''))
+            self.after(0, _done)
+
+        threading.Thread(target=_worker, daemon=True).start()
 
     def _apply_locked_quality(self):
         """앱 시작 시 저장된 밝기/대비 고정값이 있으면 하드웨어에 재적용.
@@ -5908,8 +5951,7 @@ class HoleCounter(tk.Tk):
                                         f'카운트 {cnt}건이 저장되지 않았습니다.\n종료하시겠습니까?'):
                 return
         self.running = False
-        self._led_on = False   # keep-alive 스레드가 즉시 멈추도록
-        self._led_keepalive_stop.set()
+        self._led_on = False   # keep-alive 스레드가 다음 루프에서 스스로 멈추도록
         # 카메라 스레드(_cam_loop)가 cam.read()를 쉴 새 없이 반복 호출하는 구조라,
         # 종료 순간에 OpenCV/DirectShow 네이티브 호출 도중일 확률이 높다. 그 상태에서
         # 바로 강제종료하면 Windows가 그 커널 I/O가 끝날 때까지 프로세스 정리를
