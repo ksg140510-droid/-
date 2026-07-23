@@ -2362,6 +2362,7 @@ class HoleCounter(tk.Tk):
         self._angle_width_var  = None
         self._angle_style_var  = None
         self._angle_guide      = None   # ('v'|'h', 정규화좌표) — 수평/수직 정렬 안내선
+        self._angle_show_ext   = False  # True면 외각(180°-내각, 다각형 외각 정의)을 표시
         # 각도/이탈거리 표시창 — 겹치거나 잘릴 때 드래그로 옮길 수 있게 오프셋 저장
         self._angle_label_offset = [12, -34]   # [dx, dy] px, 꼭짓점 기준
         self._angle_label_bbox   = None        # 마지막으로 그려진 화면좌표 (히트테스트용)
@@ -5269,22 +5270,33 @@ class HoleCounter(tk.Tk):
                     _vx, _vy = _pts_a[0]
                     _ax1, _ay1 = _pts_a[1]
                     _ax2, _ay2 = _pts_a[2]
+                    _show_ext = getattr(self, '_angle_show_ext', False)
                     _dx1, _dy1 = _ax1 - _vx, _ay1 - _vy
                     _dx2, _dy2 = _ax2 - _vx, _ay2 - _vy
-                    _dot   = _dx1 * _dx2 + _dy1 * _dy2
-                    _cross = _dx1 * _dy2 - _dy1 * _dx2
-                    _ang_deg = abs(_math.degrees(_math.atan2(_cross, _dot)))
+                    if _show_ext:
+                        # 외각(다각형 외각 정의: 180°-내각) — 팔2를 꼭짓점 반대편으로
+                        # 연장한 기준선(점선)과 팔1 사이의 각도로 시각화
+                        _draw_seg(draw, (_vx, _vy), (_vx - _dx2, _vy - _dy2),
+                                  _a_clr, 1, 'dashed')
+                        _dx2, _dy2 = -_dx2, -_dy2
+                    _ang_deg = self._angle_between(_dx1, _dy1, _dx2, _dy2)
                     _r_arc = 24
                     _a1deg = _math.degrees(_math.atan2(_dy1, _dx1))
                     _a2deg = _math.degrees(_math.atan2(_dy2, _dx2))
+                    _start, _end = _a1deg, _a2deg
+                    if (_end - _start) % 360 > 180:
+                        # 클릭 순서와 무관하게 항상 계산된 각도(_ang_deg)에 해당하는
+                        # 작은 쪽 호만 그린다 — 순서에 따라 반대쪽(외각처럼 보이는)
+                        # 호가 그려지던 문제 수정
+                        _start, _end = _end, _start
                     try:
                         draw.arc([_vx - _r_arc, _vy - _r_arc, _vx + _r_arc, _vy + _r_arc],
-                                   _a1deg, _a2deg, fill=_a_clr, width=1)
+                                   _start, _end, fill=_a_clr, width=1)
                     except Exception:
                         pass
                     _aoff = self._angle_label_offset
                     _atx, _aty = _vx + _aoff[0], _vy + _aoff[1]
-                    _atxt = f'∠ = {_ang_deg:.1f}°'
+                    _atxt = f'∠ = {_ang_deg:.1f}°' + ('  (외각)' if _show_ext else '')
                     draw.text((_atx, _aty), _atxt, fill=_a_clr, font=font_pil)
                     try:
                         self._angle_label_bbox = draw.textbbox(
@@ -5536,6 +5548,14 @@ class HoleCounter(tk.Tk):
             relief='flat', cursor='hand2', pady=4,
             command=self._toggle_angle_mode)
         self.btn_angle.pack(fill='x', padx=6, pady=(0, 2))
+
+        self.btn_angle_ext = tk.Button(
+            s4, text='\U0001f504  외각 보기',
+            font=('맑은 고딕', 8, 'bold'),
+            bg='#21262d', fg=TXT_G,
+            relief='flat', cursor='hand2', pady=3,
+            command=self._toggle_angle_ext)
+        self.btn_angle_ext.pack(fill='x', padx=6, pady=(0, 2))
 
         # 선 굵기 / 모양 선택 — 캡처 이미지처럼 얇은 실선이 기본값
         r_style = tk.Frame(s4, bg='#1a0a0a')
@@ -5986,6 +6006,10 @@ class HoleCounter(tk.Tk):
             self._angle_mode = True
             self._angle_pts  = []
             self._angle_guide = None
+            self._angle_show_ext = False
+            if hasattr(self, 'btn_angle_ext'):
+                self.btn_angle_ext.configure(bg='#21262d', fg=TXT_G,
+                                              text='\U0001f504  외각 보기')
             self.btn_angle.configure(bg='#7a1f1f', fg='#fff',
                                        text='\U0001f4d0  각도 측정 모드 ON ― 꼭짓점 클릭')
             if self._angle_result_var:
@@ -5996,8 +6020,49 @@ class HoleCounter(tk.Tk):
         self._angle_val   = 0.0
         self._angle_guide = None
         self._angle_label_bbox = None
+        self._angle_show_ext = False
+        if hasattr(self, 'btn_angle_ext'):
+            self.btn_angle_ext.configure(bg='#21262d', fg=TXT_G,
+                                          text='\U0001f504  외각 보기')
         if self._angle_result_var:
             self._angle_result_var.set('— °')
+
+    def _angle_between(self, dx1, dy1, dx2, dy2):
+        """두 벡터(V→P1, V→P2, 픽셀 단위) 사이의 각도(0~180°)."""
+        dot   = dx1 * dx2 + dy1 * dy2
+        cross = dx1 * dy2 - dy1 * dx2
+        return abs(_math.degrees(_math.atan2(cross, dot)))
+
+    def _toggle_angle_ext(self):
+        """내각/외각(다각형 외각 정의: 180°-내각) 표시 전환 — 팔1/팔2를 찍은
+        순서와 무관하게 원하는 쪽 값을 바로 확인할 수 있게 해준다."""
+        self._angle_show_ext = not self._angle_show_ext
+        self.btn_angle_ext.configure(
+            bg=('#7a1f1f' if self._angle_show_ext else '#21262d'),
+            fg=('#fff' if self._angle_show_ext else TXT_G),
+            text=('\U0001f504  내각 보기' if self._angle_show_ext else '\U0001f504  외각 보기'))
+        self._refresh_angle_result()
+
+    def _refresh_angle_result(self):
+        """현재 _angle_show_ext 상태를 반영해 각도 결과 라벨/값을 재계산."""
+        if len(self._angle_pts) < 3:
+            return
+        cw = self.canvas.winfo_width()
+        ch = self.canvas.winfo_height()
+        if cw <= 0 or ch <= 0:
+            return
+        p0, p1, p2 = self._angle_pts
+        dx1 = (p1[0] - p0[0]) * cw
+        dy1 = (p1[1] - p0[1]) * ch
+        dx2 = (p2[0] - p0[0]) * cw
+        dy2 = (p2[1] - p0[1]) * ch
+        if self._angle_show_ext:
+            dx2, dy2 = -dx2, -dy2
+        ang = self._angle_between(dx1, dy1, dx2, dy2)
+        self._angle_val = ang
+        if self._angle_result_var:
+            self._angle_result_var.set(
+                f'{ang:.1f}°' + ('  (외각)' if self._angle_show_ext else ''))
 
     def _snap_to_existing(self, nx, ny, cw, ch):
         """클릭 좌표를 캘리브 라인 끝점·기존 측정점·기존 각도점에 스냅(반경 SCALE_SNAP_R)."""
@@ -6268,17 +6333,7 @@ class HoleCounter(tk.Tk):
                 if self._angle_result_var:
                     self._angle_result_var.set('팔 끝점 2를 클릭하세요...')
             elif n == 3:
-                p0, p1, p2 = self._angle_pts
-                dx1 = (p1[0] - p0[0]) * cw
-                dy1 = (p1[1] - p0[1]) * ch
-                dx2 = (p2[0] - p0[0]) * cw
-                dy2 = (p2[1] - p0[1]) * ch
-                dot   = dx1 * dx2 + dy1 * dy2
-                cross = dx1 * dy2 - dy1 * dx2
-                ang = abs(_math.degrees(_math.atan2(cross, dot)))
-                self._angle_val = ang
-                if self._angle_result_var:
-                    self._angle_result_var.set(f'{ang:.1f}°')
+                self._refresh_angle_result()
 
     # ── 줌 캘리브레이션 파일 ─────────────────────────────────────────────────
 
