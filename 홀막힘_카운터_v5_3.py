@@ -101,6 +101,8 @@ DEFECT_REASONS = ['오염', '파손', '이물질', '가공불량', '기타']
 SCALE_MARGIN   = 28    # 스케일 바 좌하단 여백
 SCALE_SNAP_R   = 20    # 캘리브레이션 클릭 스냅 반경(px)
 SCALE_TARGET_PX = 180  # 스케일 바 목표 픽셀 폭 (nice값 계산 기준)
+ANGLE_WIDTH_MAP = {'얇게': 1, '보통': 2, '굵게': 3}   # 각도 측정 선 굵기 선택지
+ANGLE_STYLE_MAP = {'실선': 'solid', '점선': 'dashed'}  # 각도 측정 선 모양 선택지
 # 바탕화면 기준 경로 사용 — exe(onefile) 실행 시 __file__ 이 매번 삭제되는 임시
 # 압축해제 폴더를 가리켜 캘리브레이션이 재시작마다 초기화되는 문제 방지
 _CAL_FILE      = os.path.join(os.path.expanduser('~'), 'Desktop', '홀막힘_캘리브레이션.json')
@@ -114,6 +116,33 @@ def _nice_scale(px_per_mm, target_px=SCALE_TARGET_PX):
         if v >= target_mm * 0.5:
             return max(int(v * px_per_mm), 20), v
     return max(int(10.0 * px_per_mm), 20), 10.0
+
+def _draw_seg(draw, p1, p2, fill, width, style='solid'):
+    """PIL ImageDraw에 실선/점선 선분을 그린다 (각도 측정 오버레이용)."""
+    if style != 'dashed':
+        draw.line([p1, p2], fill=fill, width=width)
+        return
+    x1, y1 = p1
+    x2, y2 = p2
+    length = _math.hypot(x2 - x1, y2 - y1)
+    if length <= 0:
+        return
+    dash, gap = 6, 4
+    ux, uy = (x2 - x1) / length, (y2 - y1) / length
+    d = 0.0
+    while d < length:
+        sx, sy = x1 + ux * d, y1 + uy * d
+        ed = min(d + dash, length)
+        ex, ey = x1 + ux * ed, y1 + uy * ed
+        draw.line([(sx, sy), (ex, ey)], fill=fill, width=width)
+        d += dash + gap
+
+def _bbox_hit(bbox, x, y, pad=4):
+    """(x0,y0,x1,y1) 화면좌표 bbox 안(여유 pad px 포함)에 점이 있는지 확인."""
+    if not bbox:
+        return False
+    x0, y0, x1, y1 = bbox
+    return (x0 - pad) <= x <= (x1 + pad) and (y0 - pad) <= y <= (y1 + pad)
 
 def _xl_safe(v):
     """Excel 수식 인젝션 방지: =,+,-,@ 로 시작하는 사용자 입력값 앞에 인용부호 추가"""
@@ -2325,6 +2354,22 @@ class HoleCounter(tk.Tk):
         self._cal_status_var  = None
         self._deviation_val   = 0.0  # 마지막 측정된 이탈 거리 (mm)
         self._cal_store       = self._load_cal_file()
+        # ── 각도 측정 (3점: 꼭짓점 → 팔1 → 팔2) ──────────────
+        self._angle_mode       = False
+        self._angle_pts        = []   # [(nx, ny), ...] 정규화 좌표, 최대 3점
+        self._angle_val        = 0.0  # 마지막 측정된 각도 (°)
+        self._angle_result_var = None  # _build_dimension_panel 에서 생성
+        self._angle_width_var  = None
+        self._angle_style_var  = None
+        self._angle_guide      = None   # ('v'|'h', 정규화좌표) — 수평/수직 정렬 안내선
+        # 각도/이탈거리 표시창 — 겹치거나 잘릴 때 드래그로 옮길 수 있게 오프셋 저장
+        self._angle_label_offset = [12, -34]   # [dx, dy] px, 꼭짓점 기준
+        self._angle_label_bbox   = None        # 마지막으로 그려진 화면좌표 (히트테스트용)
+        self._angle_label_drag   = False
+        self._meas_label_offset  = [6, -22]    # 이탈거리 표시창 오프셋 (선 중점 기준)
+        self._meas_label_bbox    = None
+        self._meas_label_drag    = False
+        self._label_drag_ref     = (0, 0, 0, 0)  # (press_x, press_y, base_dx, base_dy)
         self._focus_score        = 0.0
         self._focus_baseline     = 0.0
         self._px_per_mm_baseline = 0.0
@@ -5068,6 +5113,8 @@ class HoleCounter(tk.Tk):
             _in_meas = getattr(self, '_measure_mode', False)
             _c_pts   = getattr(self, '_cal_pts',   [])
             _m_pts   = getattr(self, '_measure_pts', [])
+            _in_ang  = getattr(self, '_angle_mode', False)
+            _a_pts   = getattr(self, '_angle_pts',  [])
 
             _p1x = int(self._cal_line_p1[0] * pw)
             _p1y = int(self._cal_line_p1[1] * ph)
@@ -5150,6 +5197,8 @@ class HoleCounter(tk.Tk):
                 draw.text((_s2x0, _s2y-24), _s2lbl, fill=(0, 180, 220), font=font_pil)
 
             # ── 이탈 측정 오버레이 ─────────────────────────────
+            if not _in_meas:
+                self._meas_label_bbox = None
             if _in_meas and _m_pts:
                 _m_clr = (0, 220, 255)
                 _pts_s = [(int(nx * pw), int(ny * ph)) for nx, ny in _m_pts]
@@ -5167,12 +5216,89 @@ class HoleCounter(tk.Tk):
                     _myc = (_pts_s[0][1] + _pts_s[1][1]) // 2
                     _rv  = getattr(self, '_meas_result_var', None)
                     if _rv:
-                        draw.text((_mxc + 6, _myc - 22),
-                                   _rv.get(), fill=(0, 255, 180), font=font_pil)
-                elif len(_pts_s) == 1:
+                        _moff = self._meas_label_offset
+                        _mtx, _mty = _mxc + _moff[0], _myc + _moff[1]
+                        _mtxt = _rv.get()
+                        draw.text((_mtx, _mty), _mtxt, fill=(0, 255, 180), font=font_pil)
+                        try:
+                            self._meas_label_bbox = draw.textbbox(
+                                (_mtx, _mty), _mtxt, font=font_pil)
+                        except Exception:
+                            self._meas_label_bbox = (_mtx, _mty, _mtx + 70, _mty + 20)
+                    else:
+                        self._meas_label_bbox = None
+                else:
+                    self._meas_label_bbox = None
+                if len(_pts_s) == 1:
                     draw.text((_pts_s[0][0] + 14, _pts_s[0][1] - 10),
                                '두 번째 점 클릭',
                                fill=_m_clr, font=font_pil)
+
+            # ── 각도 측정 정렬 안내선 (기존 점과 수평/수직 맞을 때 하늘색 선) ──
+            _guide = getattr(self, '_angle_guide', None)
+            if _in_ang and _guide:
+                _gclr = (0, 220, 255)
+                if _guide[0] == 'v':
+                    _gx = int(_guide[1] * pw)
+                    draw.line([(_gx, 0), (_gx, ph)], fill=_gclr, width=1)
+                else:
+                    _gy = int(_guide[1] * ph)
+                    draw.line([(0, _gy), (pw, _gy)], fill=_gclr, width=1)
+
+            # ── 각도 측정 오버레이 (꼭짓점→팔1→팔2, 3점) ────────
+            if not _in_ang:
+                self._angle_label_bbox = None
+            if _in_ang and _a_pts:
+                _a_clr  = (220, 60, 60)
+                _a_w    = ANGLE_WIDTH_MAP.get(
+                    self._angle_width_var.get() if self._angle_width_var else '얇게', 1)
+                _a_sty  = ANGLE_STYLE_MAP.get(
+                    self._angle_style_var.get() if self._angle_style_var else '실선', 'solid')
+                _pts_a  = [(int(nx * pw), int(ny * ph)) for nx, ny in _a_pts]
+                for _idx, (sx, sy) in enumerate(_pts_a):
+                    draw.ellipse([sx - 5, sy - 5, sx + 5, sy + 5],
+                                  outline=_a_clr, width=1)
+                _lbl_map = ('V', 'A1', 'A2')
+                for _idx, (sx, sy) in enumerate(_pts_a):
+                    draw.text((sx + 8, sy + 6), _lbl_map[_idx],
+                               fill=_a_clr, font=font_pil)
+                if len(_pts_a) >= 2:
+                    _draw_seg(draw, _pts_a[0], _pts_a[1], _a_clr, _a_w, _a_sty)
+                if len(_pts_a) >= 3:
+                    _draw_seg(draw, _pts_a[0], _pts_a[2], _a_clr, _a_w, _a_sty)
+                    _vx, _vy = _pts_a[0]
+                    _ax1, _ay1 = _pts_a[1]
+                    _ax2, _ay2 = _pts_a[2]
+                    _dx1, _dy1 = _ax1 - _vx, _ay1 - _vy
+                    _dx2, _dy2 = _ax2 - _vx, _ay2 - _vy
+                    _dot   = _dx1 * _dx2 + _dy1 * _dy2
+                    _cross = _dx1 * _dy2 - _dy1 * _dx2
+                    _ang_deg = abs(_math.degrees(_math.atan2(_cross, _dot)))
+                    _r_arc = 24
+                    _a1deg = _math.degrees(_math.atan2(_dy1, _dx1))
+                    _a2deg = _math.degrees(_math.atan2(_dy2, _dx2))
+                    try:
+                        draw.arc([_vx - _r_arc, _vy - _r_arc, _vx + _r_arc, _vy + _r_arc],
+                                   _a1deg, _a2deg, fill=_a_clr, width=1)
+                    except Exception:
+                        pass
+                    _aoff = self._angle_label_offset
+                    _atx, _aty = _vx + _aoff[0], _vy + _aoff[1]
+                    _atxt = f'∠ = {_ang_deg:.1f}°'
+                    draw.text((_atx, _aty), _atxt, fill=_a_clr, font=font_pil)
+                    try:
+                        self._angle_label_bbox = draw.textbbox(
+                            (_atx, _aty), _atxt, font=font_pil)
+                    except Exception:
+                        self._angle_label_bbox = (_atx, _aty, _atx + 90, _aty + 20)
+                elif len(_pts_a) == 2:
+                    self._angle_label_bbox = None
+                    draw.text((_pts_a[1][0] + 10, _pts_a[1][1] - 14),
+                               '팔 끝점 2 클릭', fill=_a_clr, font=font_pil)
+                elif len(_pts_a) == 1:
+                    self._angle_label_bbox = None
+                    draw.text((_pts_a[0][0] + 10, _pts_a[0][1] - 14),
+                               '팔 끝점 1 클릭', fill=_a_clr, font=font_pil)
 
             # ── 실시간 돋보기 오버레이 ────────────────────────────
             if getattr(self, '_magnifier_on', False):
@@ -5241,12 +5367,32 @@ class HoleCounter(tk.Tk):
                          highlightbackground='#2c5f9e', highlightthickness=1)
         outer.pack(fill='x', pady=(4, 0))
 
-        # ── 헤더 ──────────────────────────────────────────────
+        # ── 헤더: 캘리브 상태(항상 표시) + 기능 탭 버튼 ──────────
         hdr = tk.Frame(outer, bg='#1a3a5c')
         hdr.pack(fill='x')
-        tk.Label(hdr, text='  \U0001f4cf  이탈 거리 측정  (카메라 2점 클릭)',
-                 font=('맑은 고딕', 9, 'bold'), bg='#1a3a5c', fg=TXT_W
-                 ).pack(side='left', padx=8, pady=4)
+        self._dim_calib_status_lbl = tk.Label(
+            hdr, text='캘리브 확인 중...', font=('맑은 고딕', 8, 'bold'),
+            bg='#1a3a5c', fg=TXT_G, anchor='w', wraplength=280, justify='left')
+        self._dim_calib_status_lbl.pack(fill='x', padx=8, pady=(4, 2))
+
+        _tabrow1 = tk.Frame(hdr, bg='#1a3a5c')
+        _tabrow1.pack(fill='x', padx=4)
+        _tabrow2 = tk.Frame(hdr, bg='#1a3a5c')
+        _tabrow2.pack(fill='x', padx=4, pady=(2, 4))
+
+        self._dim_tab_btns = {}
+        for _key, _lbl in (('cal', '① 캘리브'), ('length', '② 길이'), ('angle', '③ 각도')):
+            _b = tk.Button(_tabrow1, text=_lbl, font=('맑은 고딕', 8, 'bold'),
+                           bg='#21262d', fg=TXT_G, relief='flat', cursor='hand2', pady=4,
+                           command=lambda k=_key: self._select_dim_tab(k))
+            _b.pack(side='left', fill='x', expand=True, padx=1)
+            self._dim_tab_btns[_key] = _b
+        for _key, _lbl in (('cut', '④ 컷팅캡처'), ('quick', '⑤ 빠른캡처')):
+            _b = tk.Button(_tabrow2, text=_lbl, font=('맑은 고딕', 8, 'bold'),
+                           bg='#21262d', fg=TXT_G, relief='flat', cursor='hand2', pady=4,
+                           command=lambda k=_key: self._select_dim_tab(k))
+            _b.pack(side='left', fill='x', expand=True, padx=1)
+            self._dim_tab_btns[_key] = _b
 
         # ── STEP 1: 캘리브레이션 (접이식 — 한 번 설정하면 평소엔 접어둠) ──
         s1 = tk.Frame(outer, bg='#151008',
@@ -5372,6 +5518,60 @@ class HoleCounter(tk.Tk):
                   bg='#2a2a2a', fg=TXT_W, relief='flat', cursor='hand2', pady=2,
                   command=self._reset_meas).pack(fill='x', padx=6, pady=(0, 6))
 
+        # ── 칼날 각도 측정 (3점 클릭 — 캘리브레이션 불필요, ④⑤ 캡처에 함께 기록됨) ──
+        s4 = tk.Frame(outer, bg='#1a0a0a',
+                      highlightbackground='#7a1f1f', highlightthickness=1)
+        s4.pack(fill='x', padx=4, pady=(2, 4))
+
+        tk.Label(s4, text='  \U0001f4d0  칼날 각도 측정  — 꼭짓점→팔1→팔2 순서로 3점 클릭'
+                        '  (④⑤ 캡처 탭에 함께 기록됨)',
+                 font=('맑은 고딕', 9, 'bold'), bg='#1a0a0a', fg=ACC_RED,
+                 wraplength=250, justify='left'
+                 ).pack(anchor='w', padx=4, pady=(4, 2))
+
+        self.btn_angle = tk.Button(
+            s4, text='\U0001f4d0  각도 측정 모드 OFF',
+            font=('맑은 고딕', 9, 'bold'),
+            bg='#21262d', fg=TXT_G,
+            relief='flat', cursor='hand2', pady=4,
+            command=self._toggle_angle_mode)
+        self.btn_angle.pack(fill='x', padx=6, pady=(0, 2))
+
+        # 선 굵기 / 모양 선택 — 캡처 이미지처럼 얇은 실선이 기본값
+        r_style = tk.Frame(s4, bg='#1a0a0a')
+        r_style.pack(fill='x', padx=6, pady=(0, 2))
+        tk.Label(r_style, text='선 굵기:', font=('맑은 고딕', 8),
+                 bg='#1a0a0a', fg=TXT_G).pack(side='left')
+        self._angle_width_var = tk.StringVar(value='얇게')
+        ttk.Combobox(r_style, textvariable=self._angle_width_var,
+                     values=list(ANGLE_WIDTH_MAP.keys()), state='readonly',
+                     width=5, font=('맑은 고딕', 8)).pack(side='left', padx=(2, 8))
+        tk.Label(r_style, text='선 모양:', font=('맑은 고딕', 8),
+                 bg='#1a0a0a', fg=TXT_G).pack(side='left')
+        self._angle_style_var = tk.StringVar(value='실선')
+        ttk.Combobox(r_style, textvariable=self._angle_style_var,
+                     values=list(ANGLE_STYLE_MAP.keys()), state='readonly',
+                     width=5, font=('맑은 고딕', 8)).pack(side='left', padx=2)
+
+        # 각도 결과 (크게)
+        res_box_a = tk.Frame(s4, bg='#220d0d',
+                              highlightbackground='#7a1f1f', highlightthickness=1)
+        res_box_a.pack(fill='x', padx=6, pady=2)
+        tk.Label(res_box_a, text='각도',
+                 font=('맑은 고딕', 9), bg='#220d0d', fg=TXT_G).pack(pady=(4, 0))
+        self._angle_result_var = tk.StringVar(value='— °')
+        tk.Label(res_box_a, textvariable=self._angle_result_var,
+                 font=('맑은 고딕', 20, 'bold'), bg='#220d0d', fg=ACC_RED
+                 ).pack(pady=(0, 4))
+
+        tk.Button(s4, text='각도 초기화', font=('맑은 고딕', 9),
+                  bg='#2a2a2a', fg=TXT_W, relief='flat', cursor='hand2', pady=2,
+                  command=self._reset_angle).pack(fill='x', padx=6, pady=(0, 6))
+
+        tk.Label(s4, text='길이는 [② 길이] 탭의 측정값을 그대로 사용합니다',
+                 font=('맑은 고딕', 8), bg='#1a0a0a', fg='#8b949e',
+                 wraplength=250, justify='left').pack(anchor='w', padx=6, pady=(0, 6))
+
         # ── STEP 3: 제품 컷팅 이미지 캡처 (측정 아님 — 단순 기록용 캡처) ──────
         # 이 패널의 실제 색상은 아래 self._apply_cut_capture_theme() 호출이
         # 라이트/다크 테마에 맞춰 직접 칠한다 (CUT_CAPTURE_COLORS 참고).
@@ -5473,6 +5673,95 @@ class HoleCounter(tk.Tk):
         self._cut_capture_btn.pack(fill='x', padx=6, pady=(0, 6))
 
         self._apply_cut_capture_theme()
+
+        # ── 빠른 캡처 (LOT/SN 등 입력 없이 즉시 촬영) ───────────
+        s5 = tk.Frame(outer, bg='#0a1424',
+                      highlightbackground='#2c5f9e', highlightthickness=1)
+        s5.pack(fill='x', padx=4, pady=(2, 4))
+
+        tk.Label(s5, text='  \U0001f4f8  빠른 캡처  — LOT/SN 등 입력 없이 즉시 촬영',
+                 font=('맑은 고딕', 9, 'bold'), bg='#0a1424', fg='#4a9fd4',
+                 wraplength=250, justify='left').pack(anchor='w', padx=4, pady=(4, 2))
+        tk.Label(s5, text='측정해 둔 각도/길이가 있으면 이미지에 함께 기록됩니다.',
+                 font=('맑은 고딕', 8), bg='#0a1424', fg='#8b949e',
+                 wraplength=250, justify='left').pack(anchor='w', padx=6, pady=(0, 6))
+
+        tk.Button(s5, text='\U0001f4f8  지금 화면 캡처', font=('맑은 고딕', 10, 'bold'),
+                  bg='#1a3a6b', fg='#fff', relief='flat', cursor='hand2', pady=8,
+                  command=self._capture_quick_image).pack(fill='x', padx=6, pady=(0, 8))
+
+        # ── 탭 전환 초기화: 캘리브 상태 라벨 갱신 + 기본 탭(①) 표시 ──
+        self._dim_tab_frames = {'cal': s1, 'length': s2, 'angle': s4,
+                                 'cut': s3, 'quick': s5}
+        self._update_calib_status_label()
+        self._select_dim_tab('cal')
+
+    def _update_calib_status_label(self):
+        if not hasattr(self, '_dim_calib_status_lbl'):
+            return
+        if self._px_per_mm > 0:
+            self._dim_calib_status_lbl.configure(
+                text=f'✓ 캘리브 완료  (1mm = {self._px_per_mm:.1f}px)', fg='#4caf50')
+        else:
+            self._dim_calib_status_lbl.configure(
+                text='⚠ 캘리브 필요  (① 탭에서 먼저 설정하세요)', fg=ACC_YEL)
+
+    def _select_dim_tab(self, key):
+        if not hasattr(self, '_dim_tab_frames') or key not in self._dim_tab_frames:
+            return
+        self._dim_active_tab = key
+        self._update_calib_status_label()
+        for k, frame in self._dim_tab_frames.items():
+            if k == key:
+                frame.pack(fill='x', padx=4, pady=(2, 4))
+            else:
+                frame.pack_forget()
+        for k, btn in self._dim_tab_btns.items():
+            if k == key:
+                btn.configure(bg=ACC_BLU, fg='#fff')
+            else:
+                btn.configure(bg='#21262d', fg=TXT_G)
+
+    def _capture_quick_image(self):
+        """LOT/SN/컷팅횟수 입력 없이 즉시 촬영 — 측정해 둔 각도/길이가 있으면
+        캡처 이미지 하단에 함께 기록한다."""
+        with self._frame_lock:
+            frame = self._frame.copy() if self._frame is not None else None
+        if frame is None:
+            messagebox.showwarning('캡처 실패', '카메라 화면이 없습니다.')
+            return
+
+        now = datetime.datetime.now()
+        ts  = now.strftime('%Y%m%d_%H%M%S')
+        save_dir = os.path.join(CUTTING_CAPTURE_DIR, '빠른캡처')
+        fname = os.path.join(save_dir, f'{ts}.jpg')
+
+        img  = Image.fromarray(frame)
+        draw = ImageDraw.Draw(img)
+        try:
+            font = ImageFont.truetype('C:\\Windows\\Fonts\\malgunbd.ttf', 22)
+        except Exception:
+            font = ImageFont.load_default()
+
+        angle_txt  = f'   각도: {self._angle_val:.1f}°' if self._angle_val > 0 else ''
+        length_txt = f'   길이: {self._deviation_val:.2f}mm' if self._deviation_val > 0 else ''
+        overlay = (f'빠른 캡처{angle_txt}{length_txt}   '
+                   f'[{now.strftime("%Y-%m-%d %H:%M:%S")}]')
+        draw.rectangle([0, img.height - 40, img.width, img.height], fill=(0, 0, 0))
+        draw.text((10, img.height - 33), overlay, fill=(255, 213, 74), font=font)
+
+        try:
+            os.makedirs(save_dir, exist_ok=True)
+            img.save(fname, quality=95)
+        except Exception as ex:
+            messagebox.showerror(
+                '캡처 저장 실패',
+                f'디스크 오류로 이미지를 저장하지 못했습니다.\n\n상세 정보: {ex}')
+            return
+
+        self.lbl_flash.configure(
+            text=f'빠른 캡처 저장: 빠른캡처/{os.path.basename(fname)}', fg='#4a9fd4')
+        self.after(3000, lambda: self.lbl_flash.configure(text=''))
 
     def _select_cutting_side(self, side):
         self._cutting_side = side
@@ -5595,8 +5884,10 @@ class HoleCounter(tk.Tk):
 
         side_label = '오른쪽 컷팅면 (R)' if side == 'R' else '왼쪽 컷팅면 (L)'
         blade_txt = f'   칼날: {blade}' if blade else ''
+        angle_txt  = f'   각도: {self._angle_val:.1f}°' if self._angle_val > 0 else ''
+        length_txt = f'   길이: {self._deviation_val:.2f}mm' if self._deviation_val > 0 else ''
         overlay = (f'{side_label}   LOT: {lot}   SN: {safe_serial}   '
-                   f'컷팅 {count}회{blade_txt}   '
+                   f'컷팅 {count}회{blade_txt}{angle_txt}{length_txt}   '
                    f'[{now.strftime("%Y-%m-%d %H:%M:%S")}]')
         draw.rectangle([0, img.height - 40, img.width, img.height], fill=(0, 0, 0))
         draw.text((10, img.height - 33), overlay, fill=(255, 213, 74), font=font)
@@ -5625,6 +5916,7 @@ class HoleCounter(tk.Tk):
     def _reset_meas(self):
         self._measure_pts  = []
         self._deviation_val = 0.0
+        self._meas_label_bbox = None
         if self._meas_result_var:
             self._meas_result_var.set('— mm')
 
@@ -5642,6 +5934,11 @@ class HoleCounter(tk.Tk):
         if hasattr(self, 'btn_measure'):
             self.btn_measure.configure(bg='#21262d', fg=TXT_G,
                                        text='\U0001f4cf  측정 모드 OFF')
+        # 각도 측정 모드 해제
+        self._angle_mode = False
+        if hasattr(self, 'btn_angle'):
+            self.btn_angle.configure(bg='#21262d', fg=TXT_G,
+                                       text='\U0001f4d0  각도 측정 모드 OFF')
         # 캘리브레이션 시작
         self._cal_mode = True
         self._cal_pts  = []
@@ -5662,12 +5959,71 @@ class HoleCounter(tk.Tk):
                 return
             self._cal_mode = False
             self._cal_pts  = []
+            self._angle_mode = False
+            if hasattr(self, 'btn_angle'):
+                self.btn_angle.configure(bg='#21262d', fg=TXT_G,
+                                           text='\U0001f4d0  각도 측정 모드 OFF')
             self._measure_mode = True
             self._measure_pts  = []
             self.btn_measure.configure(bg='#1a5c2e', fg='#fff',
                                        text='\U0001f4cf  측정 모드 ON  ― 두 점 클릭')
             if self._meas_result_var:
                 self._meas_result_var.set('첫 번째 점을 클릭하세요...')
+
+    def _toggle_angle_mode(self):
+        if self._angle_mode:
+            self._angle_mode = False
+            self.btn_angle.configure(bg='#21262d', fg=TXT_G,
+                                       text='\U0001f4d0  각도 측정 모드 OFF')
+        else:
+            self._cal_mode = False
+            self._cal_pts  = []
+            self._measure_mode = False
+            self._measure_pts  = []
+            if hasattr(self, 'btn_measure'):
+                self.btn_measure.configure(bg='#21262d', fg=TXT_G,
+                                           text='\U0001f4cf  측정 모드 OFF')
+            self._angle_mode = True
+            self._angle_pts  = []
+            self._angle_guide = None
+            self.btn_angle.configure(bg='#7a1f1f', fg='#fff',
+                                       text='\U0001f4d0  각도 측정 모드 ON ― 꼭짓점 클릭')
+            if self._angle_result_var:
+                self._angle_result_var.set('꼭짓점을 클릭하세요...')
+
+    def _reset_angle(self):
+        self._angle_pts   = []
+        self._angle_val   = 0.0
+        self._angle_guide = None
+        self._angle_label_bbox = None
+        if self._angle_result_var:
+            self._angle_result_var.set('— °')
+
+    def _snap_to_existing(self, nx, ny, cw, ch):
+        """클릭 좌표를 캘리브 라인 끝점·기존 측정점·기존 각도점에 스냅(반경 SCALE_SNAP_R)."""
+        ex, ey = nx * cw, ny * ch
+        candidates = ([self._cal_line_p1, self._cal_line_p2]
+                       + self._measure_pts + self._angle_pts)
+        best, best_d = None, SCALE_SNAP_R
+        for cnx, cny in candidates:
+            d = _math.hypot(ex - cnx * cw, ey - cny * ch)
+            if d <= best_d:
+                best_d, best = d, (cnx, cny)
+        return best if best else (nx, ny)
+
+    def _compute_align_guide(self, ex, ey, cw, ch):
+        """호버/클릭 좌표가 기존 각도점과 수평·수직으로 맞는지 확인해 안내선 정보 반환."""
+        TOL = 6
+        best = None
+        for pnx, pny in self._angle_pts:
+            px, py = pnx * cw, pny * ch
+            dvx = abs(ex - px)
+            if dvx <= TOL and (best is None or dvx < best[2]):
+                best = ('v', pnx, dvx)
+            dhy = abs(ey - py)
+            if dhy <= TOL and (best is None or dhy < best[2]):
+                best = ('h', pny, dhy)
+        return (best[0], best[1]) if best else None
 
     # ── 캔버스 드래그 이벤트 ──────────────────────────────────────────────────
 
@@ -5694,7 +6050,7 @@ class HoleCounter(tk.Tk):
         return None
 
     def _nudge_line(self, dx_px, dy_px):
-        if self._cal_mode or self._measure_mode:
+        if self._cal_mode or self._measure_mode or self._angle_mode:
             return
         cw = self.canvas.winfo_width()
         ch = self.canvas.winfo_height()
@@ -5715,8 +6071,19 @@ class HoleCounter(tk.Tk):
         if cw <= 0 or ch <= 0:
             return
         self.canvas.focus_set()
+        # 표시창(각도/이탈거리 라벨) 드래그 — 클릭/캘리브 라인 처리보다 우선
+        if self._angle_mode and _bbox_hit(self._angle_label_bbox, event.x, event.y):
+            self._angle_label_drag = True
+            self._label_drag_ref = (event.x, event.y,
+                                     self._angle_label_offset[0], self._angle_label_offset[1])
+            return
+        if self._measure_mode and _bbox_hit(self._meas_label_bbox, event.x, event.y):
+            self._meas_label_drag = True
+            self._label_drag_ref = (event.x, event.y,
+                                     self._meas_label_offset[0], self._meas_label_offset[1])
+            return
         hit = self._line_hit(event.x, event.y, cw, ch)
-        if hit and not self._cal_mode and not self._measure_mode:
+        if hit and not self._cal_mode and not self._measure_mode and not self._angle_mode:
             self._line_dragging = hit
             self._line_active   = hit
             mx, my = event.x / cw, event.y / ch
@@ -5735,6 +6102,16 @@ class HoleCounter(tk.Tk):
             self._on_canvas_click(event)
 
     def _on_canvas_drag(self, event):
+        if self._angle_label_drag:
+            ox, oy, bdx, bdy = self._label_drag_ref
+            self._angle_label_offset[0] = bdx + (event.x - ox)
+            self._angle_label_offset[1] = bdy + (event.y - oy)
+            return
+        if self._meas_label_drag:
+            ox, oy, bdx, bdy = self._label_drag_ref
+            self._meas_label_offset[0] = bdx + (event.x - ox)
+            self._meas_label_offset[1] = bdy + (event.y - oy)
+            return
         cw = self.canvas.winfo_width()
         ch = self.canvas.winfo_height()
         if cw <= 0 or ch <= 0 or not self._line_dragging:
@@ -5757,7 +6134,9 @@ class HoleCounter(tk.Tk):
                                    max(0.0, min(1.0, by + dy)))
 
     def _on_canvas_release(self, event):
-        self._line_dragging = None
+        self._line_dragging    = None
+        self._angle_label_drag = False
+        self._meas_label_drag  = False
 
     def _on_canvas_hover(self, event):
         cw = self.canvas.winfo_width()
@@ -5767,7 +6146,15 @@ class HoleCounter(tk.Tk):
         # 돋보기용 마우스 위치 갱신
         self._mouse_nx = max(0.0, min(1.0, event.x / cw))
         self._mouse_ny = max(0.0, min(1.0, event.y / ch))
-        if (not self._cal_mode and not self._measure_mode and
+        # 각도 측정 중 — 기존 점과 수평/수직 정렬되는지 실시간 확인
+        if self._angle_mode and self._angle_pts and len(self._angle_pts) < 3:
+            self._angle_guide = self._compute_align_guide(event.x, event.y, cw, ch)
+        else:
+            self._angle_guide = None
+        if ((self._angle_mode and _bbox_hit(self._angle_label_bbox, event.x, event.y)) or
+                (self._measure_mode and _bbox_hit(self._meas_label_bbox, event.x, event.y))):
+            self.canvas.configure(cursor='fleur')
+        elif (not self._cal_mode and not self._measure_mode and not self._angle_mode and
                 self._line_hit(event.x, event.y, cw, ch)):
             self.canvas.configure(cursor='fleur')
         else:
@@ -5832,6 +6219,7 @@ class HoleCounter(tk.Tk):
                 self._cal_status_var.set(
                     f'✓ 완료  {ref_mm:.2f}mm = {px_dist:.1f}px'
                     f'  →  1mm = {self._px_per_mm:.2f}px  ✓')
+                self._update_calib_status_label()
         elif self._measure_mode:
             # 측정 완료 상태(2점 있음)에서 새 클릭 → 초기화 후 재시작
             if len(self._measure_pts) >= 2:
@@ -5850,6 +6238,47 @@ class HoleCounter(tk.Tk):
                 self._deviation_val = mm
                 if self._meas_result_var:
                     self._meas_result_var.set(f'{mm:.2f} mm')
+
+        elif self._angle_mode:
+            # 측정 완료 상태(3점 있음)에서 새 클릭 → 초기화 후 재시작
+            if len(self._angle_pts) >= 3:
+                self._angle_pts = []
+                self._angle_label_bbox = None
+
+            # 1순위: 기존 점(캘리브 라인/이탈거리 측정점/각도점)에 스냅
+            _snapped = self._snap_to_existing(nx, ny, cw, ch)
+            if _snapped != (nx, ny):
+                nx, ny = _snapped
+            elif self._angle_pts:
+                # 2순위: 이전 각도점과 수평/수직 정렬 스냅
+                _guide = self._compute_align_guide(event.x, event.y, cw, ch)
+                if _guide:
+                    if _guide[0] == 'v':
+                        nx = _guide[1]
+                    else:
+                        ny = _guide[1]
+
+            self._angle_pts.append((nx, ny))
+            self._angle_guide = None
+            n = len(self._angle_pts)
+            if n == 1:
+                if self._angle_result_var:
+                    self._angle_result_var.set('팔 끝점 1을 클릭하세요...')
+            elif n == 2:
+                if self._angle_result_var:
+                    self._angle_result_var.set('팔 끝점 2를 클릭하세요...')
+            elif n == 3:
+                p0, p1, p2 = self._angle_pts
+                dx1 = (p1[0] - p0[0]) * cw
+                dy1 = (p1[1] - p0[1]) * ch
+                dx2 = (p2[0] - p0[0]) * cw
+                dy2 = (p2[1] - p0[1]) * ch
+                dot   = dx1 * dx2 + dy1 * dy2
+                cross = dx1 * dy2 - dy1 * dx2
+                ang = abs(_math.degrees(_math.atan2(cross, dot)))
+                self._angle_val = ang
+                if self._angle_result_var:
+                    self._angle_result_var.set(f'{ang:.1f}°')
 
     # ── 줌 캘리브레이션 파일 ─────────────────────────────────────────────────
 
