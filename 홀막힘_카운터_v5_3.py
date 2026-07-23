@@ -5398,7 +5398,7 @@ class HoleCounter(tk.Tk):
                            command=lambda k=_key: self._select_dim_tab(k))
             _b.pack(side='left', fill='x', expand=True, padx=1)
             self._dim_tab_btns[_key] = _b
-        for _key, _lbl in (('cut', '④ 컷팅캡처'), ('quick', '⑤ 빠른캡처')):
+        for _key, _lbl in (('cut', '④ 컷팅캡처'),):
             _b = tk.Button(_tabrow2, text=_lbl, font=('맑은 고딕', 8, 'bold'),
                            bg='#21262d', fg=TXT_G, relief='flat', cursor='hand2', pady=4,
                            command=lambda k=_key: self._select_dim_tab(k))
@@ -5527,7 +5527,12 @@ class HoleCounter(tk.Tk):
 
         tk.Button(s2, text='측정 초기화', font=('맑은 고딕', 9),
                   bg='#2a2a2a', fg=TXT_W, relief='flat', cursor='hand2', pady=2,
-                  command=self._reset_meas).pack(fill='x', padx=6, pady=(0, 6))
+                  command=self._reset_meas).pack(fill='x', padx=6, pady=(0, 2))
+
+        tk.Button(s2, text='\U0001f4f8  길이 측정 캡처', font=('맑은 고딕', 9, 'bold'),
+                  bg='#1a5c2e', fg='#fff', relief='flat', cursor='hand2', pady=5,
+                  command=lambda: self._capture_measure_image('length')
+                  ).pack(fill='x', padx=6, pady=(0, 6))
 
         # ── 칼날 각도 측정 (3점 클릭 — 캘리브레이션 불필요, ④⑤ 캡처에 함께 기록됨) ──
         s4 = tk.Frame(outer, bg='#1a0a0a',
@@ -5585,7 +5590,12 @@ class HoleCounter(tk.Tk):
 
         tk.Button(s4, text='각도 초기화', font=('맑은 고딕', 9),
                   bg='#2a2a2a', fg=TXT_W, relief='flat', cursor='hand2', pady=2,
-                  command=self._reset_angle).pack(fill='x', padx=6, pady=(0, 6))
+                  command=self._reset_angle).pack(fill='x', padx=6, pady=(0, 2))
+
+        tk.Button(s4, text='\U0001f4f8  각도 측정 캡처', font=('맑은 고딕', 9, 'bold'),
+                  bg='#7a1f1f', fg='#fff', relief='flat', cursor='hand2', pady=5,
+                  command=lambda: self._capture_measure_image('angle')
+                  ).pack(fill='x', padx=6, pady=(0, 6))
 
         tk.Label(s4, text='길이는 [② 길이] 탭의 측정값을 그대로 사용합니다',
                  font=('맑은 고딕', 8), bg='#1a0a0a', fg='#8b949e',
@@ -5693,25 +5703,8 @@ class HoleCounter(tk.Tk):
 
         self._apply_cut_capture_theme()
 
-        # ── 빠른 캡처 (LOT/SN 등 입력 없이 즉시 촬영) ───────────
-        s5 = tk.Frame(outer, bg='#0a1424',
-                      highlightbackground='#2c5f9e', highlightthickness=1)
-        s5.pack(fill='x', padx=4, pady=(2, 4))
-
-        tk.Label(s5, text='  \U0001f4f8  빠른 캡처  — LOT/SN 등 입력 없이 즉시 촬영',
-                 font=('맑은 고딕', 9, 'bold'), bg='#0a1424', fg='#4a9fd4',
-                 wraplength=250, justify='left').pack(anchor='w', padx=4, pady=(4, 2))
-        tk.Label(s5, text='측정해 둔 각도/길이가 있으면 이미지에 함께 기록됩니다.',
-                 font=('맑은 고딕', 8), bg='#0a1424', fg='#8b949e',
-                 wraplength=250, justify='left').pack(anchor='w', padx=6, pady=(0, 6))
-
-        tk.Button(s5, text='\U0001f4f8  지금 화면 캡처', font=('맑은 고딕', 10, 'bold'),
-                  bg='#1a3a6b', fg='#fff', relief='flat', cursor='hand2', pady=8,
-                  command=self._capture_quick_image).pack(fill='x', padx=6, pady=(0, 8))
-
         # ── 탭 전환 초기화: 캘리브 상태 라벨 갱신 + 기본 탭(①) 표시 ──
-        self._dim_tab_frames = {'cal': s1, 'length': s2, 'angle': s4,
-                                 'cut': s3, 'quick': s5}
+        self._dim_tab_frames = {'cal': s1, 'length': s2, 'angle': s4, 'cut': s3}
         self._update_calib_status_label()
         self._select_dim_tab('cal')
 
@@ -5741,9 +5734,9 @@ class HoleCounter(tk.Tk):
             else:
                 btn.configure(bg='#21262d', fg=TXT_G)
 
-    def _capture_quick_image(self):
-        """LOT/SN/컷팅횟수 입력 없이 즉시 촬영 — 측정해 둔 각도/길이가 있으면
-        캡처 이미지 하단에 함께 기록한다."""
+    def _capture_measure_image(self, kind):
+        """길이/각도 탭에서 바로 찍는 원클릭 캡처 — LOT/SN 입력 없이 즉시
+        촬영하고, 해당 측정값만 이미지 하단에 기록한다 (kind: 'length'|'angle')."""
         with self._frame_lock:
             frame = self._frame.copy() if self._frame is not None else None
         if frame is None:
@@ -5752,7 +5745,13 @@ class HoleCounter(tk.Tk):
 
         now = datetime.datetime.now()
         ts  = now.strftime('%Y%m%d_%H%M%S')
-        save_dir = os.path.join(CUTTING_CAPTURE_DIR, '빠른캡처')
+        if kind == 'angle':
+            folder_name = '각도측정캡처'
+            label_txt   = f'각도측정   각도: {self._angle_val:.1f}°'
+        else:
+            folder_name = '길이측정캡처'
+            label_txt   = f'길이측정   길이: {self._deviation_val:.2f}mm'
+        save_dir = os.path.join(CUTTING_CAPTURE_DIR, folder_name)
         fname = os.path.join(save_dir, f'{ts}.jpg')
 
         img  = Image.fromarray(frame)
@@ -5762,10 +5761,7 @@ class HoleCounter(tk.Tk):
         except Exception:
             font = ImageFont.load_default()
 
-        angle_txt  = f'   각도: {self._angle_val:.1f}°' if self._angle_val > 0 else ''
-        length_txt = f'   길이: {self._deviation_val:.2f}mm' if self._deviation_val > 0 else ''
-        overlay = (f'빠른 캡처{angle_txt}{length_txt}   '
-                   f'[{now.strftime("%Y-%m-%d %H:%M:%S")}]')
+        overlay = f'{label_txt}   [{now.strftime("%Y-%m-%d %H:%M:%S")}]'
         draw.rectangle([0, img.height - 40, img.width, img.height], fill=(0, 0, 0))
         draw.text((10, img.height - 33), overlay, fill=(255, 213, 74), font=font)
 
@@ -5779,7 +5775,7 @@ class HoleCounter(tk.Tk):
             return
 
         self.lbl_flash.configure(
-            text=f'빠른 캡처 저장: 빠른캡처/{os.path.basename(fname)}', fg='#4a9fd4')
+            text=f'캡처 저장: {folder_name}/{os.path.basename(fname)}', fg='#4a9fd4')
         self.after(3000, lambda: self.lbl_flash.configure(text=''))
 
     def _select_cutting_side(self, side):
