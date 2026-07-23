@@ -5201,39 +5201,7 @@ class HoleCounter(tk.Tk):
             if not _in_meas:
                 self._meas_label_bbox = None
             if _in_meas and _m_pts:
-                _m_clr = (0, 220, 255)
-                _pts_s = [(int(nx * pw), int(ny * ph)) for nx, ny in _m_pts]
-                for _idx, (sx, sy) in enumerate(_pts_s):
-                    draw.ellipse([sx - 8, sy - 8, sx + 8, sy + 8],
-                                  outline=_m_clr, width=2)
-                    draw.line([sx - 14, sy, sx + 14, sy], fill=_m_clr, width=1)
-                    draw.line([sx, sy - 14, sx, sy + 14], fill=_m_clr, width=1)
-                    draw.text((sx + 10, sy - 18), f'P{_idx + 1}',
-                               fill=_m_clr, font=font_pil)
-                if len(_pts_s) == 2:
-                    draw.line([_pts_s[0][0], _pts_s[0][1],
-                                _pts_s[1][0], _pts_s[1][1]], fill=_m_clr, width=2)
-                    _mxc = (_pts_s[0][0] + _pts_s[1][0]) // 2
-                    _myc = (_pts_s[0][1] + _pts_s[1][1]) // 2
-                    _rv  = getattr(self, '_meas_result_var', None)
-                    if _rv:
-                        _moff = self._meas_label_offset
-                        _mtx, _mty = _mxc + _moff[0], _myc + _moff[1]
-                        _mtxt = _rv.get()
-                        draw.text((_mtx, _mty), _mtxt, fill=(0, 255, 180), font=font_pil)
-                        try:
-                            self._meas_label_bbox = draw.textbbox(
-                                (_mtx, _mty), _mtxt, font=font_pil)
-                        except Exception:
-                            self._meas_label_bbox = (_mtx, _mty, _mtx + 70, _mty + 20)
-                    else:
-                        self._meas_label_bbox = None
-                else:
-                    self._meas_label_bbox = None
-                if len(_pts_s) == 1:
-                    draw.text((_pts_s[0][0] + 14, _pts_s[0][1] - 10),
-                               '두 번째 점 클릭',
-                               fill=_m_clr, font=font_pil)
+                self._draw_measure_overlay(draw, pw, ph, font_pil, _m_pts)
 
             # ── 각도 측정 정렬 안내선 (기존 점과 수평/수직 맞을 때 하늘색 선) ──
             _guide = getattr(self, '_angle_guide', None)
@@ -5250,66 +5218,7 @@ class HoleCounter(tk.Tk):
             if not _in_ang:
                 self._angle_label_bbox = None
             if _in_ang and _a_pts:
-                _a_clr  = (220, 60, 60)
-                _a_w    = ANGLE_WIDTH_MAP.get(
-                    self._angle_width_var.get() if self._angle_width_var else '얇게', 1)
-                _a_sty  = ANGLE_STYLE_MAP.get(
-                    self._angle_style_var.get() if self._angle_style_var else '실선', 'solid')
-                _pts_a  = [(int(nx * pw), int(ny * ph)) for nx, ny in _a_pts]
-                for _idx, (sx, sy) in enumerate(_pts_a):
-                    draw.ellipse([sx - 5, sy - 5, sx + 5, sy + 5],
-                                  outline=_a_clr, width=1)
-                _lbl_map = ('V', 'A1', 'A2')
-                for _idx, (sx, sy) in enumerate(_pts_a):
-                    draw.text((sx + 8, sy + 6), _lbl_map[_idx],
-                               fill=_a_clr, font=font_pil)
-                if len(_pts_a) >= 2:
-                    _draw_seg(draw, _pts_a[0], _pts_a[1], _a_clr, _a_w, _a_sty)
-                if len(_pts_a) >= 3:
-                    _draw_seg(draw, _pts_a[0], _pts_a[2], _a_clr, _a_w, _a_sty)
-                    _vx, _vy = _pts_a[0]
-                    _ax1, _ay1 = _pts_a[1]
-                    _ax2, _ay2 = _pts_a[2]
-                    _show_ext = getattr(self, '_angle_show_ext', False)
-                    _dx1, _dy1 = _ax1 - _vx, _ay1 - _vy
-                    _dx2, _dy2 = _ax2 - _vx, _ay2 - _vy
-                    _ang_deg = self._angle_between(_dx1, _dy1, _dx2, _dy2)  # 항상 내각(0~180)
-                    _r_arc = 24
-                    _a1deg = _math.degrees(_math.atan2(_dy1, _dx1))
-                    _a2deg = _math.degrees(_math.atan2(_dy2, _dx2))
-                    _start, _end = _a1deg, _a2deg
-                    if (_end - _start) % 360 > 180:
-                        # 클릭 순서와 무관하게 항상 내각(_ang_deg)에 해당하는
-                        # 작은 쪽 호가 기본(_start→_end)이 되도록 고정
-                        _start, _end = _end, _start
-                    if _show_ext:
-                        # 외각(반사각) = 360°-내각 — 꼭짓점 바깥쪽(나머지) 호를 그린다
-                        _start, _end = _end, _start
-                        _disp_deg = 360.0 - _ang_deg
-                    else:
-                        _disp_deg = _ang_deg
-                    try:
-                        draw.arc([_vx - _r_arc, _vy - _r_arc, _vx + _r_arc, _vy + _r_arc],
-                                   _start, _end, fill=_a_clr, width=1)
-                    except Exception:
-                        pass
-                    _aoff = self._angle_label_offset
-                    _atx, _aty = _vx + _aoff[0], _vy + _aoff[1]
-                    _atxt = f'∠ = {_disp_deg:.1f}°' + ('  (외각)' if _show_ext else '')
-                    draw.text((_atx, _aty), _atxt, fill=_a_clr, font=font_pil)
-                    try:
-                        self._angle_label_bbox = draw.textbbox(
-                            (_atx, _aty), _atxt, font=font_pil)
-                    except Exception:
-                        self._angle_label_bbox = (_atx, _aty, _atx + 90, _aty + 20)
-                elif len(_pts_a) == 2:
-                    self._angle_label_bbox = None
-                    draw.text((_pts_a[1][0] + 10, _pts_a[1][1] - 14),
-                               '팔 끝점 2 클릭', fill=_a_clr, font=font_pil)
-                elif len(_pts_a) == 1:
-                    self._angle_label_bbox = None
-                    draw.text((_pts_a[0][0] + 10, _pts_a[0][1] - 14),
-                               '팔 끝점 1 클릭', fill=_a_clr, font=font_pil)
+                self._draw_angle_overlay(draw, pw, ph, font_pil, _a_pts)
 
             # ── 실시간 돋보기 오버레이 ────────────────────────────
             if getattr(self, '_magnifier_on', False):
@@ -5534,13 +5443,13 @@ class HoleCounter(tk.Tk):
                   command=lambda: self._capture_measure_image('length')
                   ).pack(fill='x', padx=6, pady=(0, 6))
 
-        # ── 칼날 각도 측정 (3점 클릭 — 캘리브레이션 불필요, ④⑤ 캡처에 함께 기록됨) ──
+        # ── 칼날 각도 측정 (3점 클릭 — 캘리브레이션 불필요, ④ 컷팅캡처에도 함께 기록됨) ──
         s4 = tk.Frame(outer, bg='#1a0a0a',
                       highlightbackground='#7a1f1f', highlightthickness=1)
         s4.pack(fill='x', padx=4, pady=(2, 4))
 
         tk.Label(s4, text='  \U0001f4d0  칼날 각도 측정  — 꼭짓점→팔1→팔2 순서로 3점 클릭'
-                        '  (④⑤ 캡처 탭에 함께 기록됨)',
+                        '  (④ 컷팅캡처 탭에도 함께 기록됨)',
                  font=('맑은 고딕', 9, 'bold'), bg='#1a0a0a', fg=ACC_RED,
                  wraplength=250, justify='left'
                  ).pack(anchor='w', padx=4, pady=(4, 2))
@@ -5736,7 +5645,8 @@ class HoleCounter(tk.Tk):
 
     def _capture_measure_image(self, kind):
         """길이/각도 탭에서 바로 찍는 원클릭 캡처 — LOT/SN 입력 없이 즉시
-        촬영하고, 해당 측정값만 이미지 하단에 기록한다 (kind: 'length'|'angle')."""
+        촬영하고, 화면에 그려져 있던 측정선/각도 표시를 이미지에도 그대로
+        남긴 뒤 하단에 값 요약을 기록한다 (kind: 'length'|'angle')."""
         with self._frame_lock:
             frame = self._frame.copy() if self._frame is not None else None
         if frame is None:
@@ -5746,7 +5656,7 @@ class HoleCounter(tk.Tk):
         now = datetime.datetime.now()
         ts  = now.strftime('%Y%m%d_%H%M%S')
         if kind == 'angle':
-            folder_name = '각도측정캡처'
+            folder_name = '칼날각도캡처'
             label_txt   = f'각도측정   각도: {self._angle_val:.1f}°'
         else:
             folder_name = '길이측정캡처'
@@ -5760,6 +5670,13 @@ class HoleCounter(tk.Tk):
             font = ImageFont.truetype('C:\\Windows\\Fonts\\malgunbd.ttf', 22)
         except Exception:
             font = ImageFont.load_default()
+
+        # 화면에 보이던 측정선/점/각도 호를 실제 촬영 해상도 기준으로 다시 그려
+        # 캡처 이미지에도 그대로 남긴다 (라이브 미리보기와 동일 로직 재사용)
+        if kind == 'angle' and len(self._angle_pts) >= 1:
+            self._draw_angle_overlay(draw, img.width, img.height, font, self._angle_pts)
+        elif kind == 'length' and len(self._measure_pts) >= 1:
+            self._draw_measure_overlay(draw, img.width, img.height, font, self._measure_pts)
 
         overlay = f'{label_txt}   [{now.strftime("%Y-%m-%d %H:%M:%S")}]'
         draw.rectangle([0, img.height - 40, img.width, img.height], fill=(0, 0, 0))
@@ -5896,6 +5813,12 @@ class HoleCounter(tk.Tk):
             font = ImageFont.truetype('C:\\Windows\\Fonts\\malgunbd.ttf', 22)
         except Exception:
             font = ImageFont.load_default()
+
+        # 측정해 둔 각도/길이가 있으면 화면에 보이던 측정선을 이미지에도 그대로 남긴다
+        if len(self._angle_pts) >= 1:
+            self._draw_angle_overlay(draw, img.width, img.height, font, self._angle_pts)
+        elif len(self._measure_pts) >= 1:
+            self._draw_measure_overlay(draw, img.width, img.height, font, self._measure_pts)
 
         side_label = '오른쪽 컷팅면 (R)' if side == 'R' else '왼쪽 컷팅면 (L)'
         blade_txt = f'   칼날: {blade}' if blade else ''
@@ -6057,6 +5980,108 @@ class HoleCounter(tk.Tk):
         if self._angle_result_var:
             self._angle_result_var.set(
                 f'{disp:.1f}°' + ('  (외각)' if self._angle_show_ext else ''))
+
+    def _draw_angle_overlay(self, draw, pw, ph, font_pil, angle_pts):
+        """각도 측정 오버레이(점/선/호/라벨)를 draw에 그린다 — 실시간 미리보기와
+        캡처 이미지 저장(_capture_measure_image) 양쪽에서 공용으로 사용해
+        캡처된 사진에도 실제 측정선이 그대로 남도록 보장한다."""
+        _a_clr  = (220, 60, 60)
+        _a_w    = ANGLE_WIDTH_MAP.get(
+            self._angle_width_var.get() if self._angle_width_var else '얇게', 1)
+        _a_sty  = ANGLE_STYLE_MAP.get(
+            self._angle_style_var.get() if self._angle_style_var else '실선', 'solid')
+        _pts_a  = [(int(nx * pw), int(ny * ph)) for nx, ny in angle_pts]
+        for _idx, (sx, sy) in enumerate(_pts_a):
+            draw.ellipse([sx - 5, sy - 5, sx + 5, sy + 5],
+                          outline=_a_clr, width=1)
+        _lbl_map = ('V', 'A1', 'A2')
+        for _idx, (sx, sy) in enumerate(_pts_a):
+            draw.text((sx + 8, sy + 6), _lbl_map[_idx],
+                       fill=_a_clr, font=font_pil)
+        if len(_pts_a) >= 2:
+            _draw_seg(draw, _pts_a[0], _pts_a[1], _a_clr, _a_w, _a_sty)
+        if len(_pts_a) >= 3:
+            _draw_seg(draw, _pts_a[0], _pts_a[2], _a_clr, _a_w, _a_sty)
+            _vx, _vy = _pts_a[0]
+            _ax1, _ay1 = _pts_a[1]
+            _ax2, _ay2 = _pts_a[2]
+            _show_ext = getattr(self, '_angle_show_ext', False)
+            _dx1, _dy1 = _ax1 - _vx, _ay1 - _vy
+            _dx2, _dy2 = _ax2 - _vx, _ay2 - _vy
+            _ang_deg = self._angle_between(_dx1, _dy1, _dx2, _dy2)  # 항상 내각(0~180)
+            _r_arc = 24
+            _a1deg = _math.degrees(_math.atan2(_dy1, _dx1))
+            _a2deg = _math.degrees(_math.atan2(_dy2, _dx2))
+            _start, _end = _a1deg, _a2deg
+            if (_end - _start) % 360 > 180:
+                # 클릭 순서와 무관하게 항상 내각(_ang_deg)에 해당하는
+                # 작은 쪽 호가 기본(_start→_end)이 되도록 고정
+                _start, _end = _end, _start
+            if _show_ext:
+                # 외각(반사각) = 360°-내각 — 꼭짓점 바깥쪽(나머지) 호를 그린다
+                _start, _end = _end, _start
+                _disp_deg = 360.0 - _ang_deg
+            else:
+                _disp_deg = _ang_deg
+            try:
+                draw.arc([_vx - _r_arc, _vy - _r_arc, _vx + _r_arc, _vy + _r_arc],
+                           _start, _end, fill=_a_clr, width=1)
+            except Exception:
+                pass
+            _aoff = self._angle_label_offset
+            _atx, _aty = _vx + _aoff[0], _vy + _aoff[1]
+            _atxt = f'∠ = {_disp_deg:.1f}°' + ('  (외각)' if _show_ext else '')
+            draw.text((_atx, _aty), _atxt, fill=_a_clr, font=font_pil)
+            try:
+                self._angle_label_bbox = draw.textbbox(
+                    (_atx, _aty), _atxt, font=font_pil)
+            except Exception:
+                self._angle_label_bbox = (_atx, _aty, _atx + 90, _aty + 20)
+        elif len(_pts_a) == 2:
+            self._angle_label_bbox = None
+            draw.text((_pts_a[1][0] + 10, _pts_a[1][1] - 14),
+                       '팔 끝점 2 클릭', fill=_a_clr, font=font_pil)
+        elif len(_pts_a) == 1:
+            self._angle_label_bbox = None
+            draw.text((_pts_a[0][0] + 10, _pts_a[0][1] - 14),
+                       '팔 끝점 1 클릭', fill=_a_clr, font=font_pil)
+
+    def _draw_measure_overlay(self, draw, pw, ph, font_pil, measure_pts):
+        """이탈 거리 측정 오버레이(점/선/라벨)를 draw에 그린다 — 실시간 미리보기와
+        캡처 이미지 저장(_capture_measure_image) 양쪽에서 공용으로 사용."""
+        _m_clr = (0, 220, 255)
+        _pts_s = [(int(nx * pw), int(ny * ph)) for nx, ny in measure_pts]
+        for _idx, (sx, sy) in enumerate(_pts_s):
+            draw.ellipse([sx - 8, sy - 8, sx + 8, sy + 8],
+                          outline=_m_clr, width=2)
+            draw.line([sx - 14, sy, sx + 14, sy], fill=_m_clr, width=1)
+            draw.line([sx, sy - 14, sx, sy + 14], fill=_m_clr, width=1)
+            draw.text((sx + 10, sy - 18), f'P{_idx + 1}',
+                       fill=_m_clr, font=font_pil)
+        if len(_pts_s) == 2:
+            draw.line([_pts_s[0][0], _pts_s[0][1],
+                        _pts_s[1][0], _pts_s[1][1]], fill=_m_clr, width=2)
+            _mxc = (_pts_s[0][0] + _pts_s[1][0]) // 2
+            _myc = (_pts_s[0][1] + _pts_s[1][1]) // 2
+            _rv  = getattr(self, '_meas_result_var', None)
+            if _rv:
+                _moff = self._meas_label_offset
+                _mtx, _mty = _mxc + _moff[0], _myc + _moff[1]
+                _mtxt = _rv.get()
+                draw.text((_mtx, _mty), _mtxt, fill=(0, 255, 180), font=font_pil)
+                try:
+                    self._meas_label_bbox = draw.textbbox(
+                        (_mtx, _mty), _mtxt, font=font_pil)
+                except Exception:
+                    self._meas_label_bbox = (_mtx, _mty, _mtx + 70, _mty + 20)
+            else:
+                self._meas_label_bbox = None
+        else:
+            self._meas_label_bbox = None
+        if len(_pts_s) == 1:
+            draw.text((_pts_s[0][0] + 14, _pts_s[0][1] - 10),
+                       '두 번째 점 클릭',
+                       fill=_m_clr, font=font_pil)
 
     def _snap_to_existing(self, nx, ny, cw, ch):
         """클릭 좌표를 캘리브 라인 끝점·기존 측정점·기존 각도점에 스냅(반경 SCALE_SNAP_R)."""
